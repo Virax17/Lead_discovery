@@ -1,0 +1,74 @@
+# Lead Discovery Platform - Update Plan
+
+This implementation plan covers the 7 required updates from the new brief, applying fixes to quotas, customizable keywords, new data fields, customizable exports, UI updates, and correctness filters.
+
+## User Review Required
+Please review the proposed API and schema changes below.
+> [!IMPORTANT]
+> **Region Code Mapping**: To pass `regionCode` to the Google API, the backend needs a 2-letter ISO country code. Should the frontend pass the 2-letter code directly alongside the full country name, or should the backend try to map it using a library like `pycountry`? (The plan currently assumes the frontend will pass `country_code` in the API payload).
+
+> [!WARNING]
+> **Emails and Website URLs**: Google Places API does **not** natively return email addresses. To get an email, we would need to scrape the business's website domain and look for `mailto:` links or contact pages. 
+> 1. Should I add a web scraping step to fetch the HTML of the `websiteUri` and search for an email address?
+> 2. You mentioned "there is sub which save wrong url". Do you want the system to clean the Google Places URL (e.g., strip out tracking parameters like `?utm_source`) or extract just the base domain? Please clarify what the "wrong URL" issue looks like so I can build the exact fix!
+
+> [!WARNING]
+> **Settings Management**: The new `app_settings` for Paid Overage toggle will be added to the MongoDB schema. Since this phase is local-only, I will add a basic API endpoint `GET/PUT /api/settings` to toggle the plan, but I will not build a full settings management page in the UI unless you request it. The overage estimate will simply be shown on the Dashboard based on the backend setting.
+
+## Proposed Changes
+
+### Backend Configuration & Quota
+- **[MODIFY]** `app/config/quota.py`
+  - Update `PLACE_DETAILS_MONTHLY_FREE_LIMIT = 1000`.
+  - Update `QUOTA_WARNING_THRESHOLD = 800`.
+  - Update `QUOTA_BLOCK_THRESHOLD = 1000`.
+- **[MODIFY]** `app/config/places_fields.py`
+  - Append `internationalPhoneNumber` to `PLACE_DETAILS_FIELD_MASK`.
+- **[NEW]** `app/config/keywords.py` (Update constants)
+  - Replace generic hardware keywords with the 11 new Heavy Industrial keywords.
+  - Add the 6 new Industry Types.
+
+### Database Schemas
+- **[MODIFY]** `app/models/schemas.py`
+  - Add `phone_number: Optional[str] = None` and `industry_type: Optional[str] = None` to `MasterBusiness`.
+  - Add `keywords: List[str]`, `industries: List[str]`, `website_only: bool`, and `country_code: str` to `SearchCreate`.
+  - **[NEW]** Add `AppSettings` schema to store `active_plan` and `allow_paid_overage`.
+
+### Backend Services & API
+- **[MODIFY]** `app/services/quota_tracker.py`
+  - Fetch `AppSettings` from MongoDB.
+  - Return the overage limits and current plan in `get_current_usage()`.
+- **[MODIFY]** `app/services/places_client.py`
+  - Add `regionCode` to the `textQuery` payload.
+- **[MODIFY]** `app/services/search_runner.py`
+  - Loop over the dynamic `keywords` list provided in the search request.
+  - Implement country validation check on `details.address`. If it fails, log as `country_mismatch_filtered` and discard.
+  - Implement the `website_only` filter post-Place Details. If enabled and no website is returned, skip adding to `search_results`.
+  - Handle quota limit: log `skipped_quota_blocked` if hit and overage is disabled.
+- **[MODIFY]** `app/services/export_engine.py`
+  - Accept `selected_columns` and dynamically filter the Pandas DataFrame.
+- **[MODIFY]** `app/api/searches.py`
+  - Pass the new request properties to `run_region_search`.
+  - Update the `/export` endpoint to accept column selections.
+
+### Frontend UI Updates
+- **[MODIFY]** `src/api.js`
+  - Update payloads for Search creation and exports.
+- **[MODIFY]** `src/components/Dashboard.jsx` (Search Setup & Preview)
+  - Add editable chips/lists for Keywords and Industry Types.
+  - Add a Website-Only toggle.
+  - Replace the immediate "Start Search" with a 2-step flow: Setup -> Preview Summary -> Confirm Start.
+  - Display the new 1,000 quota limit and overage estimates.
+- **[MODIFY]** `src/components/Results.jsx`
+  - Add new columns (Phone Number, Industry Type) to the table.
+  - Add a "Customize Export" modal or checkbox list before downloading CSV/Excel.
+
+## Verification Plan
+### Automated Verification
+- Verify the MongoDB collections reflect the new schemas on the first run.
+- Verify `text_search_ids` payload constructs correctly with `regionCode`.
+
+### Manual Verification
+- Test creating a search through the UI to ensure the 2-step preview flow works correctly and custom keywords are passed correctly.
+- Test downloading an export with only a subset of columns selected.
+- Manually trigger a mock quota limit hit to verify the UI warnings and `skipped_quota_blocked` logic.
