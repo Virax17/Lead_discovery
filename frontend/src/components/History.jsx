@@ -1,72 +1,139 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { fetchHistory, downloadFile } from '../api';
-import { Download, ChevronRight } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Download } from 'lucide-react';
+import { downloadFile, fetchHistory } from '../api';
+import { useI18n } from '../i18n/I18nContext';
+
+const PAGE_SIZE = 20;
+const TERMINAL_STATUSES = new Set(['completed', 'completed_quota_limited', 'completed_rate_limited', 'failed']);
+
+function statusClass(status) {
+    if (status === 'completed') return 'bg-emerald-100 text-emerald-800';
+    if (status === 'completed_quota_limited') return 'bg-amber-100 text-amber-800';
+    if (status === 'failed' || status === 'completed_rate_limited') return 'bg-rose-100 text-rose-800';
+    return 'bg-slate-100 text-slate-800';
+}
 
 export default function History() {
+    const { t, formatDate, formatNumber } = useI18n();
     const [history, setHistory] = useState([]);
+    const [page, setPage] = useState(1);
+    const [pageSize] = useState(PAGE_SIZE);
+    const [total, setTotal] = useState(0);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        fetchHistory().then(data => {
-            setHistory(data);
-            setLoading(false);
-        });
-    }, []);
+        let active = true;
+        setLoading(true);
 
-    if (loading) return <div className="text-center p-8">Loading history...</div>;
+        fetchHistory(page, pageSize).then(data => {
+            if (!active) return;
+            setHistory(data.items || []);
+            setTotal(data.total || 0);
+        }).catch(() => {
+            if (!active) return;
+            setHistory([]);
+            setTotal(0);
+        }).finally(() => {
+            if (active) setLoading(false);
+        });
+
+        return () => {
+            active = false;
+        };
+    }, [page, pageSize]);
+
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+
+    if (loading) {
+        return <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center text-slate-600">{t('history.loading')}</div>;
+    }
 
     return (
         <div className="space-y-6">
-            <h2 className="text-2xl font-bold text-gray-900">Search History</h2>
-            
-            <div className="bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
-                <ul className="divide-y divide-gray-200">
-                    {history.map((search) => (
-                        <li key={search.id} className="hover:bg-gray-50 transition-colors">
-                            <div className="px-6 py-4 flex items-center justify-between">
-                                <div className="flex-1 min-w-0">
-                                    <div className="flex items-center justify-between">
-                                        <p className="text-sm font-medium text-blue-600 truncate">
-                                            {search.country} {search.state ? `/ ${search.state}` : ''} {search.city ? `/ ${search.city}` : ''}
-                                        </p>
-                                        <div className="ml-2 flex-shrink-0 flex">
-                                            <p className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                                                search.status === 'completed' ? 'bg-green-100 text-green-800' :
-                                                search.status === 'completed_quota_limited' ? 'bg-amber-100 text-amber-800' :
-                                                'bg-gray-100 text-gray-800'
-                                            }`}>
-                                                {search.status}
+            <div className="flex items-center justify-between gap-4">
+                <h2 className="text-2xl font-bold text-slate-900">{t('history.title')}</h2>
+                <p className="text-sm text-slate-500">{t('common.pageOf', { page, total: totalPages })}</p>
+            </div>
+
+            <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+                <ul className="divide-y divide-slate-200">
+                    {history.map((search) => {
+                        const isFinished = TERMINAL_STATUSES.has(search.status);
+                        const hasResults = Number(search.total_results || 0) > 0;
+                        const statusLabel = t(`status.${search.status}`) || search.status;
+
+                        return (
+                            <li key={search.id} className="transition-colors hover:bg-slate-50">
+                                <div className="flex items-center justify-between gap-4 px-6 py-4">
+                                    <div className="min-w-0 flex-1">
+                                        <div className="flex items-center justify-between gap-4">
+                                            <p className="truncate text-sm font-medium text-blue-600">
+                                                {search.country} {search.state ? `/ ${search.state}` : ''} {search.city ? `/ ${search.city}` : ''}
+                                            </p>
+                                            <p className={`ml-2 inline-flex flex-shrink-0 rounded-full px-2 text-xs font-semibold leading-5 ${statusClass(search.status)}`}>
+                                                {statusLabel}
                                             </p>
                                         </div>
-                                    </div>
-                                    <div className="mt-2 flex justify-between">
-                                        <div className="sm:flex">
-                                            <p className="flex items-center text-sm text-gray-500">
-                                                {search.total_results} results • {new Date(search.created_at).toLocaleDateString()}
+
+                                        <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
+                                            <p className="text-sm text-slate-500">
+                                                {t('history.results', { count: formatNumber(search.total_results || 0) })} · {formatDate(search.created_at)}
                                             </p>
-                                        </div>
-                                        <div className="flex items-center space-x-4">
-                                            {(search.status === 'completed' || search.status === 'completed_quota_limited') && (
-                                                <>
-                                                    <button onClick={() => downloadFile(search.id, 'xlsx')} className="text-gray-500 hover:text-blue-600 transition-colors" title="Download Excel">
-                                                        <Download className="w-4 h-4" />
-                                                    </button>
-                                                    <Link to={`/search/${search.id}/results`} className="text-gray-500 hover:text-blue-600 transition-colors">
-                                                        <ChevronRight className="w-5 h-5" />
+
+                                            <div className="flex items-center gap-4">
+                                                {isFinished && hasResults && (
+                                                    <>
+                                                        <button
+                                                            onClick={() => downloadFile(search.id, 'xlsx')}
+                                                            className="text-slate-500 transition-colors hover:text-blue-600"
+                                                            title={t('history.downloadExcel')}
+                                                        >
+                                                            <Download className="h-4 w-4" />
+                                                        </button>
+                                                        <Link to={`/search/${search.id}/results`} className="text-slate-500 transition-colors hover:text-blue-600">
+                                                            <ChevronRight className="h-5 w-5" />
+                                                        </Link>
+                                                    </>
+                                                )}
+                                                {isFinished && !hasResults && (
+                                                    <Link to={`/search/${search.id}/results`} className="text-xs font-medium text-slate-500 hover:text-blue-600">
+                                                        View details
                                                     </Link>
-                                                </>
-                                            )}
+                                                )}
+                                            </div>
                                         </div>
                                     </div>
                                 </div>
-                            </div>
-                        </li>
-                    ))}
+                            </li>
+                        );
+                    })}
                     {history.length === 0 && (
-                        <li className="px-6 py-8 text-center text-gray-500">No past searches found.</li>
+                        <li className="px-6 py-8 text-center text-slate-500">{t('history.noPastSearches')}</li>
                     )}
                 </ul>
+            </div>
+
+            <div className="flex items-center justify-between">
+                <button
+                    type="button"
+                    disabled={page <= 1}
+                    onClick={() => setPage(p => Math.max(1, p - 1))}
+                    className="inline-flex items-center gap-1 rounded-full border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                    <ChevronLeft className="h-4 w-4" />
+                    {t('history.previous')}
+                </button>
+                <span className="text-sm text-slate-500">{t('history.page', { page, total: totalPages })}</span>
+                <button
+                    type="button"
+                    disabled={page >= totalPages}
+                    onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                    className="inline-flex items-center gap-1 rounded-full border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                    {t('history.next')}
+                    <ChevronRight className="h-4 w-4" />
+                </button>
             </div>
         </div>
     );

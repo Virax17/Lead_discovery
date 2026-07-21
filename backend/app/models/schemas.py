@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, Field, ConfigDict, field_validator
 from typing import Optional, List
 from datetime import datetime
 from bson import ObjectId
@@ -27,17 +27,21 @@ class MasterBusiness(BaseModel):
     phone_number: Optional[str] = None
     maps_url: Optional[str] = None
     data_source: str = "google_places"
+    country: Optional[str] = None
+    country_code: Optional[str] = None
     industry_sector: Optional[str] = None
     industry_type: Optional[str] = None
     customer_type: Optional[str] = None
     first_found_at: datetime
     last_seen_at: datetime
-    
+
     model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
 
 class Search(BaseModel):
     id: Optional[PyObjectId] = Field(alias="_id", default=None)
+    created_by: Optional[str] = None
     country: str
+    country_code: Optional[str] = None
     state: Optional[str] = None
     city: Optional[str] = None
     max_results: int
@@ -83,13 +87,18 @@ class AppError(BaseModel):
 
 class SearchCreate(BaseModel):
     country: str
-    country_code: str
+    country_code: Optional[str] = None
     state: Optional[str] = None
     city: Optional[str] = None
-    max_results: int = 100
+    max_results: int = Field(default=100, ge=1, le=100)
     keywords: List[str]
     industries: List[str]
     website_only: bool = True
+
+    @field_validator("country_code")
+    @classmethod
+    def _normalize_country_code(cls, v: Optional[str]) -> Optional[str]:
+        return v.upper() if v else v
 
 class SearchStatusResponse(BaseModel):
     id: str
@@ -104,6 +113,7 @@ class PlaceDetails(BaseModel):
     address: str
     website: Optional[str] = None
     phone_number: Optional[str] = None
+    country_code: Optional[str] = None
 
 class AppSettings(BaseModel):
     id: str = Field(alias="_id", default="singleton")
@@ -117,3 +127,45 @@ class AppSettings(BaseModel):
 class AppSettingsUpdate(BaseModel):
     active_plan: Optional[str] = None
     allow_paid_overage: Optional[bool] = None
+
+
+class UserCreate(BaseModel):
+    username: str
+    password: str
+    role: str = "user"
+    credit_limit: int = Field(default=1000, ge=0)
+
+
+class UserPasswordUpdate(BaseModel):
+    password: str = Field(min_length=1)
+
+
+class UserActiveUpdate(BaseModel):
+    active: bool
+
+
+class UserPublic(BaseModel):
+    id: str = Field(alias="_id")
+    username: str
+    role: str = "user"
+    active: bool = True
+    credit_limit: int = 1000
+    created_at: datetime
+    updated_at: datetime
+    last_login_at: Optional[datetime] = None
+    model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
+
+
+class UserUsage(UserPublic):
+    year_month: str
+    credits_used: int = 0
+    credits_remaining: Optional[int] = None
+
+
+class CurrentUser(BaseModel):
+    username: str
+    role: str
+    credit_limit: int = 1000
+    active: bool = True
+    created_at: datetime
+    last_login_at: Optional[datetime] = None

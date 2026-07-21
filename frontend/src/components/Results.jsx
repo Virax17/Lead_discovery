@@ -1,9 +1,12 @@
 import React, { useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { fetchSearch, downloadFile } from '../api';
-import { Download, AlertTriangle, SlidersHorizontal, X } from 'lucide-react';
+import { AlertTriangle, Download, SlidersHorizontal, X } from 'lucide-react';
+import { downloadFile, fetchSearch } from '../api';
+import { useI18n } from '../i18n/I18nContext';
+import { useShell } from '../context/ShellContext';
 
 const DEFAULT_COLUMNS = [
+    { key: 'source', label: 'Source' },
     { key: 'name', label: 'Company' },
     { key: 'address', label: 'Address' },
     { key: 'website', label: 'Website' },
@@ -15,6 +18,8 @@ const DEFAULT_COLUMNS = [
 export default function Results() {
     const { id } = useParams();
     const navigate = useNavigate();
+    const { t, formatNumber } = useI18n();
+    const { refreshQuota } = useShell();
     const [searchData, setSearchData] = useState(null);
     const [loading, setLoading] = useState(true);
     const [showExportPicker, setShowExportPicker] = useState(false);
@@ -24,13 +29,16 @@ export default function Results() {
         fetchSearch(id).then(data => {
             setSearchData(data);
             setLoading(false);
+            refreshQuota();
         }).catch(() => {
             navigate('/');
         });
-    }, [id, navigate]);
+    }, [id, navigate, refreshQuota]);
 
     const businesses = searchData?.businesses || [];
     const quotaLimited = searchData?.status === 'completed_quota_limited';
+    const rateLimited = searchData?.status === 'completed_rate_limited';
+    const failed = searchData?.status === 'failed';
     const exportColumns = useMemo(() => DEFAULT_COLUMNS.filter(column => selectedColumns.includes(column.key)), [selectedColumns]);
 
     const toggleColumn = (key) => {
@@ -42,7 +50,7 @@ export default function Results() {
         setShowExportPicker(false);
     };
 
-    if (loading) return <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center text-slate-600">Loading results...</div>;
+    if (loading) return <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center text-slate-600">{t('common.loading')}</div>;
     if (!searchData) return null;
 
     return (
@@ -51,13 +59,13 @@ export default function Results() {
                 <div className="border-b border-slate-200 bg-[linear-gradient(135deg,#0f172a_0%,#1d4ed8_55%,#38bdf8_100%)] px-8 py-8 text-white">
                     <div className="flex flex-wrap items-center justify-between gap-4">
                         <div>
-                            <h2 className="text-3xl font-semibold tracking-tight">Search Results</h2>
-                            <p className="mt-2 text-sm text-slate-100/90">Found {searchData.total_results} unique businesses</p>
+                            <h2 className="text-3xl font-semibold tracking-tight">{t('results.title')}</h2>
+                            <p className="mt-2 text-sm text-slate-100/90">{t('results.found', { count: formatNumber(searchData.total_results || 0) })}</p>
                         </div>
                         <div className="flex flex-wrap gap-3">
                             <button onClick={() => setShowExportPicker(true)} className="inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/10 px-4 py-2 text-sm font-medium text-white backdrop-blur hover:bg-white/20">
                                 <SlidersHorizontal className="h-4 w-4" />
-                                Customize Export
+                                {t('results.customizeExport')}
                             </button>
                         </div>
                     </div>
@@ -68,8 +76,32 @@ export default function Results() {
                         <div className="flex gap-3">
                             <AlertTriangle className="h-5 w-5 text-amber-600" />
                             <div>
-                                <p className="text-sm font-semibold text-amber-900">Search stopped early because the monthly API quota was reached.</p>
-                                <p className="mt-1 text-sm text-amber-800">The results below are partial.</p>
+                                <p className="text-sm font-semibold text-amber-900">{t('results.quotaStopped')}</p>
+                                <p className="mt-1 text-sm text-amber-800">{t('results.partial')}</p>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {rateLimited && (
+                    <div className="m-8 rounded-2xl border border-rose-200 bg-rose-50 p-4">
+                        <div className="flex gap-3">
+                            <AlertTriangle className="h-5 w-5 text-rose-600" />
+                            <div>
+                                <p className="text-sm font-semibold text-rose-900">This search failed because Google Places temporarily rate-limited requests.</p>
+                                <p className="mt-1 text-sm text-rose-800">Partial results were saved if any were found. Wait a few minutes, lower max results, then retry.</p>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {failed && (
+                    <div className="m-8 rounded-2xl border border-rose-200 bg-rose-50 p-4">
+                        <div className="flex gap-3">
+                            <AlertTriangle className="h-5 w-5 text-rose-600" />
+                            <div>
+                                <p className="text-sm font-semibold text-rose-900">This search failed before it could finish.</p>
+                                <p className="mt-1 text-sm text-rose-800">Start a smaller search and check the backend logs if it happens again.</p>
                             </div>
                         </div>
                     </div>
@@ -89,6 +121,7 @@ export default function Results() {
                         <tbody className="divide-y divide-slate-200 bg-white">
                             {businesses.map((business, index) => (
                                 <tr key={index} className="hover:bg-slate-50">
+                                    <td className="px-6 py-4 text-sm text-slate-600">LeadDiscovery</td>
                                     <td className="px-6 py-4 text-sm font-medium text-slate-900">{business.name}</td>
                                     <td className="px-6 py-4 text-sm text-slate-600">{business.address}</td>
                                     <td className="px-6 py-4 text-sm text-blue-600 hover:underline">
@@ -103,7 +136,7 @@ export default function Results() {
                             ))}
                             {businesses.length === 0 && (
                                 <tr>
-                                    <td colSpan={DEFAULT_COLUMNS.length} className="px-6 py-8 text-center text-slate-500">No businesses found for this search.</td>
+                                    <td colSpan={DEFAULT_COLUMNS.length} className="px-6 py-8 text-center text-slate-500">{t('results.noBusinesses')}</td>
                                 </tr>
                             )}
                         </tbody>
@@ -116,8 +149,8 @@ export default function Results() {
                     <div className="w-full max-w-xl rounded-[2rem] bg-white p-6 shadow-2xl">
                         <div className="flex items-start justify-between gap-4">
                             <div>
-                                <h3 className="text-xl font-semibold text-slate-900">Customize export columns</h3>
-                                <p className="mt-1 text-sm text-slate-500">Choose which fields to include in the file.</p>
+                                <h3 className="text-xl font-semibold text-slate-900">{t('results.customizeColumns')}</h3>
+                                <p className="mt-1 text-sm text-slate-500">{t('results.chooseFields')}</p>
                             </div>
                             <button onClick={() => setShowExportPicker(false)} className="rounded-full p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700">
                                 <X className="h-4 w-4" />
@@ -136,11 +169,11 @@ export default function Results() {
                         <div className="mt-6 flex flex-wrap justify-end gap-3 border-t border-slate-200 pt-5">
                             <button onClick={() => handleDownload('csv')} className="inline-flex items-center gap-2 rounded-full border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
                                 <Download className="h-4 w-4" />
-                                CSV
+                                {t('results.csv')}
                             </button>
                             <button onClick={() => handleDownload('xlsx')} className="inline-flex items-center gap-2 rounded-full bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700">
                                 <Download className="h-4 w-4" />
-                                Excel
+                                {t('results.excel')}
                             </button>
                         </div>
                     </div>

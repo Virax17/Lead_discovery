@@ -1,14 +1,15 @@
 HEAVY_INDUSTRIAL_KEYWORDS = [
     "Shutdown contractor",
-    "Mechanical specialist contractor",
     "Maintenance contractor",
+    "Controlled bolting",
     "Hydraulic torque wrench supplier",
     "Hydraulic bolt tensioner supplier",
-    "Torque test service",
-    "Nipple up nipple down service",
-    "BOP service",
-    "Artificial lift service",
-    "Drilling contractor",
+    "Flange management",
+    "Pipe cold cutting and beveling",
+    "Flange facing machine",
+    "Tube expander",
+    "Onsite machining",
+    "Hot tapping service",
     "Pipeline integrity contractor",
 ]
 

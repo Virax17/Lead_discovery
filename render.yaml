@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: lead-discovery-backend
+    env: python
+    rootDir: backend
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: MONGO_DB_NAME
+        value: lead_discovery
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false
+      - key: GOOGLE_PLACES_API_KEY
+        sync: false
+      - key: MONGO_URI
+        sync: false
+      - key: APP_SECRET_KEY
+        generateValue: true
+      - key: BOOTSTRAP_ADMIN_USERNAME
+        sync: false
+      - key: BOOTSTRAP_ADMIN_PASSWORD
+        sync: false
+      - key: BOOTSTRAP_ADMIN_CREDIT_LIMIT
+        value: "1000"
+      - key: BOOTSTRAP_USER_USERNAME
+        sync: false
+      - key: BOOTSTRAP_USER_PASSWORD
+        sync: false
+      - key: BOOTSTRAP_USER_CREDIT_LIMIT
+        value: "1000"

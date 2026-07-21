@@ -2,7 +2,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.api.auth import get_current_user
+from app.api.auth import get_current_admin
 from app.db.connection import get_db
 from app.models.schemas import AppSettings, AppSettingsUpdate
 
@@ -24,14 +24,14 @@ async def _get_settings_document():
 
 
 @router.get("")
-async def get_settings(current_user: str = Depends(get_current_user)):
+async def get_settings(current_user: dict = Depends(get_current_admin)):
     settings_doc = await _get_settings_document()
     settings_doc["id"] = str(settings_doc["_id"])
     return settings_doc
 
 
 @router.put("")
-async def update_settings(settings_in: AppSettingsUpdate, current_user: str = Depends(get_current_user)):
+async def update_settings(settings_in: AppSettingsUpdate, current_user: dict = Depends(get_current_admin)):
     db = get_db()
     update_payload = {}
 

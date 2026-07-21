@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+
+.env
+.env.local
+
+exports/*
+!exports/.gitkeep

@@ -1,19 +1,22 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { createSearch, fetchQuota } from '../api';
 import { ChevronRight, Plus, X, Sparkles, ShieldAlert } from 'lucide-react';
+import { createSearch } from '../api';
+import { useI18n } from '../i18n/I18nContext';
+import { useShell } from '../context/ShellContext';
 
 const DEFAULT_KEYWORDS = [
     'Shutdown contractor',
-    'Mechanical specialist contractor',
     'Maintenance contractor',
+    'Controlled bolting',
     'Hydraulic torque wrench supplier',
     'Hydraulic bolt tensioner supplier',
-    'Torque test service',
-    'Nipple up nipple down service',
-    'BOP service',
-    'Artificial lift service',
-    'Drilling contractor',
+    'Flange management',
+    'Pipe cold cutting and beveling',
+    'Flange facing machine',
+    'Tube expander',
+    'Onsite machining',
+    'Hot tapping service',
     'Pipeline integrity contractor'
 ];
 
@@ -26,7 +29,7 @@ const DEFAULT_INDUSTRIES = [
     'Construction'
 ];
 
-function TagEditor({ label, items, setItems, placeholder }) {
+function TagEditor({ label, items, setItems, placeholder, addLabel }) {
     const [draft, setDraft] = useState('');
 
     const addItem = () => {
@@ -47,7 +50,7 @@ function TagEditor({ label, items, setItems, placeholder }) {
                 {items.map(item => (
                     <span key={item} className="inline-flex items-center gap-2 rounded-full bg-slate-900 px-3 py-1 text-sm text-white">
                         {item}
-                        <button type="button" onClick={() => setItems(items.filter(existing => existing !== item))} className="text-white/70 hover:text-white">
+                        <button type="button" onClick={() => setItems(items.filter(existing => existing !== item))} className="text-white/70 hover:text-white" aria-label={`Remove ${item}`}>
                             <X className="h-3 w-3" />
                         </button>
                     </span>
@@ -70,7 +73,7 @@ function TagEditor({ label, items, setItems, placeholder }) {
                     className="inline-flex items-center gap-1 rounded-full border border-slate-200 px-3 py-1 text-sm font-medium text-slate-700 hover:border-slate-300 hover:bg-slate-50"
                 >
                     <Plus className="h-3 w-3" />
-                    Add
+                    {addLabel}
                 </button>
             </div>
         </div>
@@ -79,25 +82,25 @@ function TagEditor({ label, items, setItems, placeholder }) {
 
 export default function Dashboard() {
     const navigate = useNavigate();
+    const { t, formatNumber, formatCurrency } = useI18n();
+    const { quota, quotaLoading, countries, countriesLoading } = useShell();
     const [step, setStep] = useState('setup');
     const [country, setCountry] = useState('India');
-    const [countryCode, setCountryCode] = useState('IN');
     const [state, setState] = useState('');
     const [city, setCity] = useState('');
     const [maxResults, setMaxResults] = useState(100);
-    const [websiteOnly, setWebsiteOnly] = useState(true);
+    const [websiteOnly, setWebsiteOnly] = useState(false);
     const [keywords, setKeywords] = useState(DEFAULT_KEYWORDS);
     const [industries, setIndustries] = useState(DEFAULT_INDUSTRIES);
-    const [quota, setQuota] = useState(null);
     const [loading, setLoading] = useState(false);
-    const [previewLoading, setPreviewLoading] = useState(false);
     const [error, setError] = useState('');
 
-    useEffect(() => {
-        fetchQuota().then(setQuota).catch(() => setQuota(null));
-    }, []);
+    const countryCode = useMemo(() => {
+        const match = countries.find(c => c.name.toLowerCase() === country.trim().toLowerCase());
+        return match ? match.code : null;
+    }, [countries, country]);
 
-    const quotaPlan = String(quota?.active_plan || 'free').replace(/_/g, ' ');
+    const quotaPlan = quota?.active_plan === 'paid_overage' ? t('app.paidOverage') : t('app.free');
     const quotaUsed = quota?.calls_used ?? 0;
     const quotaLimit = quota?.quota_block_threshold ?? 1000;
     const quotaOverage = quota?.overage_cost_estimate ?? 0;
@@ -108,7 +111,7 @@ export default function Dashboard() {
 
     const payload = {
         country,
-        country_code: countryCode.trim().toUpperCase(),
+        country_code: countryCode,
         state: state || null,
         city: city || null,
         max_results: Number(maxResults),
@@ -117,24 +120,20 @@ export default function Dashboard() {
         website_only: websiteOnly
     };
 
-    const reviewSearch = (e) => {
-        e.preventDefault();
+    const reviewSearch = (event) => {
+        event.preventDefault();
         setError('');
-        if (!countryCode.trim() || countryCode.trim().length !== 2) {
-            setError('Country code must be a 2-letter ISO code.');
-            return;
-        }
+
         if (keywords.length === 0) {
-            setError('Add at least one keyword.');
+            setError(t('dashboard.addAtLeastOneKeyword'));
             return;
         }
         if (industries.length === 0) {
-            setError('Add at least one industry type.');
+            setError(t('dashboard.addAtLeastOneIndustry'));
             return;
         }
-        setPreviewLoading(true);
+
         setStep('preview');
-        setPreviewLoading(false);
     };
 
     const startSearch = async () => {
@@ -144,7 +143,7 @@ export default function Dashboard() {
             const data = await createSearch(payload);
             navigate(`/search/${data.search_id}/progress`);
         } catch (err) {
-            setError(err.message || 'Failed to start search');
+            setError(err.message || t('dashboard.failedToStart'));
             setLoading(false);
         }
     };
@@ -157,32 +156,34 @@ export default function Dashboard() {
                         <div>
                             <p className="mb-3 inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] text-white/90">
                                 <Sparkles className="h-3 w-3" />
-                                Lead Discovery Setup
+                                {t('dashboard.setupTag')}
                             </p>
-                            <h2 className="text-4xl font-semibold tracking-tight">Build a regional search in two steps.</h2>
+                            <h2 className="text-4xl font-semibold tracking-tight">{t('dashboard.setupHeading')}</h2>
                             <p className="mt-3 max-w-2xl text-sm text-slate-100/90">
-                                Define the search scope, review the estimated quota impact, then confirm the run.
+                                {t('dashboard.setupSubtitle')}
                             </p>
                         </div>
                         <div className="rounded-3xl border border-white/20 bg-white/10 p-5 backdrop-blur">
-                            <p className="text-xs uppercase tracking-[0.2em] text-white/70">Quota snapshot</p>
-                            {quota ? (
+                            <p className="text-xs uppercase tracking-[0.2em] text-white/70">{t('dashboard.quotaSnapshot')}</p>
+                            {quotaLoading ? (
+                                <p className="mt-3 text-sm text-white/80">{t('dashboard.loadingQuota')}</p>
+                            ) : quota ? (
                                 <div className="mt-3 space-y-2 text-sm text-white">
                                     <div className="flex items-center justify-between gap-6">
-                                        <span>Plan</span>
+                                        <span>{t('dashboard.plan')}</span>
                                         <span className="font-semibold capitalize">{quotaPlan}</span>
                                     </div>
                                     <div className="flex items-center justify-between gap-6">
-                                        <span>Used</span>
-                                        <span className="font-semibold">{quotaUsed} / {quotaLimit}</span>
+                                        <span>{t('dashboard.used')}</span>
+                                        <span className="font-semibold">{formatNumber(quotaUsed)} / {formatNumber(quotaLimit)}</span>
                                     </div>
                                     <div className="flex items-center justify-between gap-6">
-                                        <span>Overage</span>
-                                        <span className="font-semibold">${quotaOverage.toFixed(2)} est.</span>
+                                        <span>{t('dashboard.overage')}</span>
+                                        <span className="font-semibold">{formatCurrency(quotaOverage)}</span>
                                     </div>
                                 </div>
                             ) : (
-                                <p className="mt-3 text-sm text-white/80">Loading quota snapshot...</p>
+                                <p className="mt-3 text-sm text-white/80">{t('dashboard.loadingQuota')}</p>
                             )}
                         </div>
                     </div>
@@ -200,63 +201,81 @@ export default function Dashboard() {
                             <form onSubmit={reviewSearch} className="space-y-6">
                                 <div className="grid gap-4 sm:grid-cols-2">
                                     <div>
-                                        <label className="block text-sm font-medium text-slate-700">Country *</label>
-                                        <input required type="text" value={country} onChange={e => setCountry(e.target.value)} className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:bg-white" />
+                                        <label className="block text-sm font-medium text-slate-700">{t('dashboard.country')}</label>
+                                        <input
+                                            required
+                                            type="text"
+                                            list="country-options"
+                                            value={country}
+                                            onChange={e => setCountry(e.target.value)}
+                                            className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:bg-white"
+                                        />
+                                        <datalist id="country-options">
+                                            {countriesLoading ? null : countries.map(c => (
+                                                <option key={c.code} value={c.name} />
+                                            ))}
+                                        </datalist>
                                     </div>
                                     <div>
-                                        <label className="block text-sm font-medium text-slate-700">Country code *</label>
-                                        <input required maxLength={2} value={countryCode} onChange={e => setCountryCode(e.target.value.toUpperCase())} className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm uppercase outline-none transition focus:border-blue-500 focus:bg-white" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium text-slate-700">State / Region</label>
+                                        <label className="block text-sm font-medium text-slate-700">{t('dashboard.stateRegion')}</label>
                                         <input type="text" value={state} onChange={e => setState(e.target.value)} className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:bg-white" />
                                     </div>
                                     <div>
-                                        <label className="block text-sm font-medium text-slate-700">City</label>
+                                        <label className="block text-sm font-medium text-slate-700">{t('dashboard.city')}</label>
                                         <input type="text" value={city} onChange={e => setCity(e.target.value)} className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:bg-white" />
                                     </div>
                                 </div>
 
                                 <div className="grid gap-4 sm:grid-cols-2">
                                     <div>
-                                        <label className="block text-sm font-medium text-slate-700">Max Results per keyword</label>
-                                        <input type="number" min="1" max="500" value={maxResults} onChange={e => setMaxResults(parseInt(e.target.value || '0', 10))} className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:bg-white" />
+                                        <label className="block text-sm font-medium text-slate-700">{t('dashboard.maxResults')}</label>
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            max="100"
+                                            value={maxResults}
+                                            onChange={e => setMaxResults(Math.min(100, Math.max(1, parseInt(e.target.value || '1', 10))))}
+                                            className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:bg-white"
+                                        />
                                     </div>
                                     <div className="flex items-end">
                                         <label className="flex w-full items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-700">
-                                            <span>Website only</span>
+                                            <span>{t('dashboard.websiteOnly')}</span>
                                             <input type="checkbox" checked={websiteOnly} onChange={e => setWebsiteOnly(e.target.checked)} className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500" />
                                         </label>
                                     </div>
                                 </div>
 
                                 <TagEditor
-                                    label="Keywords"
+                                    label={t('dashboard.keywords')}
                                     items={keywords}
                                     setItems={setKeywords}
-                                    placeholder="Add a keyword and press Enter"
+                                    placeholder={t('dashboard.addKeyword')}
+                                    addLabel={t('dashboard.add')}
                                 />
 
                                 <TagEditor
-                                    label="Industry Types"
+                                    label={t('dashboard.industryTypes')}
                                     items={industries}
                                     setItems={setIndustries}
-                                    placeholder="Add an industry and press Enter"
+                                    placeholder={t('dashboard.addIndustry')}
+                                    addLabel={t('dashboard.add')}
                                 />
 
                                 <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-600">
-                                    Estimated place details calls: <span className="font-semibold text-slate-900">{estimatedCalls.toLocaleString()}</span>
+                                    {t('dashboard.estimatedCalls')}: <span className="font-semibold text-slate-900">{formatNumber(estimatedCalls)}</span>
                                     {quota && (
                                         <span className="ml-3">
-                                            Projected overage: <span className="font-semibold text-slate-900">{projectedOverage.toLocaleString()}</span>
+                                            {t('dashboard.projectedOverage')}: <span className="font-semibold text-slate-900">{formatNumber(projectedOverage)}</span>
                                         </span>
                                     )}
+                                    <p className="mt-2 text-xs text-slate-500">{t('dashboard.estimatedCallsNote')}</p>
                                 </div>
 
                                 <div className="flex items-center justify-between gap-4 border-t border-slate-200 pt-6">
-                                    <p className="text-sm text-slate-500">Step 1 of 2: review the search scope before starting.</p>
-                                    <button type="submit" disabled={previewLoading} className="inline-flex items-center gap-2 rounded-full bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60">
-                                        Review Summary
+                                    <p className="text-sm text-slate-500">{t('dashboard.step1')}</p>
+                                    <button type="submit" className="inline-flex items-center gap-2 rounded-full bg-slate-900 px-5 py-3 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60">
+                                        {t('dashboard.reviewSummary')}
                                         <ChevronRight className="h-4 w-4" />
                                     </button>
                                 </div>
@@ -265,34 +284,44 @@ export default function Dashboard() {
                             <div className="space-y-6">
                                 <div className="flex items-center justify-between gap-4">
                                     <div>
-                                        <p className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Preview Summary</p>
-                                        <h3 className="mt-2 text-2xl font-semibold text-slate-900">Confirm the search before launch</h3>
+                                        <p className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">{t('dashboard.previewSummary')}</p>
+                                        <h3 className="mt-2 text-2xl font-semibold text-slate-900">{t('dashboard.confirmTitle')}</h3>
                                     </div>
                                     <button type="button" onClick={() => setStep('setup')} className="rounded-full border border-slate-200 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
-                                        Back to Setup
+                                        {t('dashboard.backToSetup')}
                                     </button>
                                 </div>
 
                                 <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                                    <SummaryCard label="Region" value={`${country}${countryCode ? ` (${countryCode})` : ''}`} />
-                                    <SummaryCard label="Scope" value={`${state || 'Any state'} · ${city || 'Any city'}`} />
-                                    <SummaryCard label="Website filter" value={websiteOnly ? 'Enabled' : 'Disabled'} />
-                                    <SummaryCard label="Keywords" value={`${keywords.length} selected`} />
-                                    <SummaryCard label="Industry types" value={`${industries.length} selected`} />
-                                    <SummaryCard label="Max results" value={`${maxResults} per keyword`} />
+                                    <SummaryCard label={t('dashboard.region')} value={country} />
+                                    <SummaryCard label={t('dashboard.scope')} value={`${state || t('common.anyState')} · ${city || t('common.anyCity')}`} />
+                                    <SummaryCard label={t('dashboard.websiteFilter')} value={websiteOnly ? t('dashboard.enabled') : t('dashboard.disabled')} />
+                                    <SummaryCard label={t('dashboard.keywords')} value={t('dashboard.selected', { count: formatNumber(keywords.length) })} />
+                                    <SummaryCard label={t('dashboard.industryTypes')} value={t('dashboard.selected', { count: formatNumber(industries.length) })} />
+                                    <SummaryCard label={t('dashboard.maxResults')} value={`${formatNumber(maxResults)} ${t('dashboard.perKeyword')}`} />
                                 </div>
 
                                 <div className="grid gap-4 rounded-3xl border border-slate-200 bg-slate-50 p-5 sm:grid-cols-2">
                                     <div>
-                                        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Quota impact</p>
-                                        <p className="mt-2 text-lg font-semibold text-slate-900">{estimatedCalls.toLocaleString()} estimated place details calls</p>
-                                        <p className="mt-1 text-sm text-slate-600">This is based on {keywords.length} keywords multiplied by {maxResults} max results each.</p>
+                                        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">{t('dashboard.quotaImpact')}</p>
+                                        <p className="mt-2 text-lg font-semibold text-slate-900">{t('dashboard.estimatedCallsLabel', { count: formatNumber(estimatedCalls) })}</p>
+                                        <p className="mt-1 text-sm text-slate-600">
+                                            {t('dashboard.estimatedCalls')} = {formatNumber(keywords.length)} x {formatNumber(maxResults)}.
+                                        </p>
+                                        <p className="mt-2 text-sm text-slate-600">
+                                            Final businesses can be lower after duplicate removal, website-only filtering, and country matching.
+                                        </p>
                                     </div>
                                     <div>
-                                        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Projected usage</p>
-                                        <p className="mt-2 text-lg font-semibold text-slate-900">{projectedUsage.toLocaleString()} / {quota ? quota.quota_block_threshold.toLocaleString() : '1,000'}</p>
+                                        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">{t('dashboard.quotaUsage')}</p>
+                                        <p className="mt-2 text-lg font-semibold text-slate-900">
+                                            {t('dashboard.projectedUsageLabel', {
+                                                usage: formatNumber(projectedUsage),
+                                                limit: formatNumber(quota ? quota.quota_block_threshold : 1000),
+                                            })}
+                                        </p>
                                         <p className={`mt-1 text-sm ${searchWouldBlock ? 'text-rose-700' : 'text-slate-600'}`}>
-                                            {searchWouldBlock ? 'This run would exceed the free limit with overage disabled.' : 'The run fits within the current quota settings.'}
+                                            {searchWouldBlock ? t('dashboard.searchWouldBlock') : t('dashboard.runFits')}
                                         </p>
                                     </div>
                                 </div>
@@ -301,16 +330,16 @@ export default function Dashboard() {
                                     <div className="flex items-start gap-3">
                                         <ShieldAlert className="mt-0.5 h-5 w-5 text-amber-700" />
                                         <div>
-                                            <p className="font-semibold">Before starting</p>
-                                            <p className="mt-1 text-amber-800">The backend will stop on quota block when paid overage is disabled, and website-only searches will skip businesses without a website.</p>
+                                            <p className="font-semibold">{t('dashboard.beforeStarting')}</p>
+                                            <p className="mt-1 text-amber-800">{t('dashboard.beforeStartingBody')}</p>
                                         </div>
                                     </div>
                                 </div>
 
                                 <div className="flex items-center justify-between gap-4 border-t border-slate-200 pt-6">
-                                    <p className="text-sm text-slate-500">Step 2 of 2: confirm the search and launch it.</p>
+                                    <p className="text-sm text-slate-500">{t('dashboard.step2')}</p>
                                     <button type="button" onClick={startSearch} disabled={loading} className="inline-flex items-center gap-2 rounded-full bg-blue-600 px-5 py-3 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60">
-                                        {loading ? 'Starting Search...' : 'Confirm and Start'}
+                                        {loading ? t('dashboard.startingSearch') : t('dashboard.confirmAndStart')}
                                         <ChevronRight className="h-4 w-4" />
                                     </button>
                                 </div>
@@ -319,11 +348,11 @@ export default function Dashboard() {
                     </div>
 
                     <aside className="border-t border-slate-200 bg-slate-50/80 p-8 xl:border-l xl:border-t-0">
-                        <p className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">Search Defaults</p>
+                        <p className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">{t('dashboard.searchDefaults')}</p>
                         <div className="mt-4 space-y-3 text-sm text-slate-600">
-                            <p>11 heavy industrial keywords are preloaded so the search starts from the new brief.</p>
-                            <p>6 industry types are available as chips and can be edited inline before launch.</p>
-                            <p>Exports can be customized later from the results screen with a column selector.</p>
+                            <p>{t('dashboard.searchDefaults1')}</p>
+                            <p>{t('dashboard.searchDefaults2')}</p>
+                            <p>{t('dashboard.searchDefaults3')}</p>
                         </div>
                     </aside>
                 </div>
