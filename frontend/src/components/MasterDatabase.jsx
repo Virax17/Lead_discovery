@@ -10,10 +10,49 @@ const DEFAULT_COLUMNS = [
     { key: 'website', label: 'Website' },
     { key: 'phone_number', label: 'Phone Number' },
     { key: 'industry_type', label: 'Industry Type' },
+    { key: 'crawl_tier', label: 'Crawl Tier' },
+    { key: 'crawl_score', label: 'Crawl Score' },
+    { key: 'crawl_reason', label: 'Crawl Reason' },
+    { key: 'crawl_evidence', label: 'Crawl Evidence' },
+    { key: 'detected_language', label: 'Detected Language' },
+    { key: 'positive_concepts', label: 'Positive Concepts' },
+    { key: 'negative_concepts', label: 'Negative Concepts' },
+    { key: 'business_role', label: 'Business Role' },
+    { key: 'business_role_reason', label: 'Role Reason' },
+    { key: 'llm_fallback_status', label: 'LLM Fallback' },
+    { key: 'source_query', label: 'Source Query' },
+    { key: 'source_query_language', label: 'Query Language' },
+    { key: 'website_signal', label: 'Website Signal' },
     { key: 'maps_url', label: 'Google Maps URL' },
     { key: 'first_found_at', label: 'First Found' },
     { key: 'last_seen_at', label: 'Last Seen' }
 ];
+
+const TIER_FILTERS = [
+    { key: 'all', label: 'All' },
+    { key: 'best', label: 'Best' },
+    { key: 'strong', label: 'Strong' },
+    { key: 'weak', label: 'Weak' },
+    { key: 'reject', label: 'Reject' },
+    { key: 'unknown', label: 'Unknown' },
+];
+
+const ROLE_FILTERS = [
+    { key: 'all', label: 'All Roles' },
+    { key: 'end_user_operator', label: 'End-user' },
+    { key: 'industrial_service_contractor', label: 'Service Contractor' },
+    { key: 'epc_contractor', label: 'EPC' },
+    { key: 'supplier_distributor', label: 'Supplier/Distributor' },
+    { key: 'competitor_manufacturer', label: 'Competitor' },
+    { key: 'generic_local_service', label: 'Generic Service' },
+    { key: 'unknown', label: 'Unknown Role' },
+];
+
+function formatEvidence(value) {
+    if (!value || value.length === 0) return '-';
+    const text = Array.isArray(value) ? value.join('; ') : String(value);
+    return text.length > 180 ? `${text.slice(0, 180)}...` : text;
+}
 
 function formatDate(value, locale) {
     if (!value) return '-';
@@ -30,6 +69,8 @@ export default function MasterDatabase() {
     const [error, setError] = useState('');
     const [showExportPicker, setShowExportPicker] = useState(false);
     const [selectedColumns, setSelectedColumns] = useState(DEFAULT_COLUMNS.map(column => column.key));
+    const [tierFilter, setTierFilter] = useState('all');
+    const [roleFilter, setRoleFilter] = useState('all');
     const [downloading, setDownloading] = useState(false);
     const [populatedCountries, setPopulatedCountries] = useState([]);
     const [populatedLoading, setPopulatedLoading] = useState(true);
@@ -55,11 +96,11 @@ export default function MasterDatabase() {
         }
         setLoading(true);
         setError('');
-        fetchCountryBusinesses(country, page)
+        fetchCountryBusinesses(country, page, tierFilter, roleFilter)
             .then(setData)
             .catch(() => setError('Failed to load businesses for this country.'))
             .finally(() => setLoading(false));
-    }, [country, page]);
+    }, [country, page, tierFilter, roleFilter]);
 
     const businesses = data?.businesses || [];
     const totalPages = data ? Math.max(1, Math.ceil(data.total / data.page_size)) : 1;
@@ -72,12 +113,16 @@ export default function MasterDatabase() {
     const handleCountryChange = (value) => {
         setCountry(value);
         setPage(1);
+        setTierFilter('all');
+        setRoleFilter('all');
     };
 
     const handleDownload = async (format) => {
         setDownloading(true);
         try {
-            await downloadCountryExport(country, format, exportColumns.map(column => column.label));
+            const selectedTiers = tierFilter === 'all' ? [] : [tierFilter];
+            const selectedRoles = roleFilter === 'all' ? [] : [roleFilter];
+            await downloadCountryExport(country, format, exportColumns.map(column => column.label), selectedTiers, selectedRoles);
             setShowExportPicker(false);
         } catch {
             setError('Download failed. Please try again.');
@@ -166,6 +211,36 @@ export default function MasterDatabase() {
                             <p className="text-sm text-slate-500">
                                 {t('masterDatabase.count', { count: formatNumber(data.total), country })}
                             </p>
+                            <div className="flex flex-wrap gap-2">
+                                {TIER_FILTERS.map(filter => (
+                                    <button
+                                        key={filter.key}
+                                        type="button"
+                                        onClick={() => {
+                                            setTierFilter(filter.key);
+                                            setPage(1);
+                                        }}
+                                        className={`rounded-full border px-4 py-2 text-sm font-medium transition ${tierFilter === filter.key ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-200 bg-white text-slate-600 hover:border-blue-300 hover:text-blue-600'}`}
+                                    >
+                                        {filter.label}
+                                    </button>
+                                ))}
+                            </div>
+                            <div className="flex flex-wrap gap-2">
+                                {ROLE_FILTERS.map(filter => (
+                                    <button
+                                        key={filter.key}
+                                        type="button"
+                                        onClick={() => {
+                                            setRoleFilter(filter.key);
+                                            setPage(1);
+                                        }}
+                                        className={`rounded-full border px-4 py-2 text-sm font-medium transition ${roleFilter === filter.key ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-slate-200 bg-white text-slate-600 hover:border-indigo-300 hover:text-indigo-600'}`}
+                                    >
+                                        {filter.label}
+                                    </button>
+                                ))}
+                            </div>
                             <div className="overflow-x-auto">
                                 <table className="min-w-full divide-y divide-slate-200 rounded-2xl border border-slate-200">
                                     <thead className="bg-slate-50">
@@ -188,6 +263,19 @@ export default function MasterDatabase() {
                                                 </td>
                                                 <td className="px-6 py-4 text-sm text-slate-600">{business.phone_number || '-'}</td>
                                                 <td className="px-6 py-4 text-sm text-slate-600">{business.industry_type || '-'}</td>
+                                                <td className="px-6 py-4 text-sm font-semibold capitalize text-slate-700">{business.crawl_tier || 'unknown'}</td>
+                                                <td className="px-6 py-4 text-sm text-slate-600">{business.crawl_score ?? '-'}</td>
+                                                <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{business.crawl_reason || '-'}</td>
+                                                <td className="max-w-sm px-6 py-4 text-sm text-slate-600">{formatEvidence(business.crawl_evidence)}</td>
+                                                <td className="px-6 py-4 text-sm text-slate-600">{business.detected_language || '-'}</td>
+                                                <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{formatEvidence(business.positive_concepts)}</td>
+                                                <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{formatEvidence(business.negative_concepts)}</td>
+                                                <td className="px-6 py-4 text-sm font-medium text-slate-700">{business.business_role || '-'}</td>
+                                                <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{business.business_role_reason || '-'}</td>
+                                                <td className="px-6 py-4 text-sm text-slate-600">{business.llm_fallback_status || '-'}</td>
+                                                <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{business.source_query || '-'}</td>
+                                                <td className="px-6 py-4 text-sm text-slate-600">{business.source_query_language || '-'}</td>
+                                                <td className="px-6 py-4 text-sm text-slate-600">{business.website_signal || '-'}</td>
                                                 <td className="px-6 py-4 text-sm text-blue-600 hover:underline">
                                                     {business.maps_url ? <a href={business.maps_url} target="_blank" rel="noreferrer">Maps</a> : '-'}
                                                 </td>

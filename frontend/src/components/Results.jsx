@@ -7,13 +7,52 @@ import { useShell } from '../context/ShellContext';
 
 const DEFAULT_COLUMNS = [
     { key: 'source', label: 'Source' },
-    { key: 'name', label: 'Company' },
+    { key: 'name', label: 'Company Name' },
     { key: 'address', label: 'Address' },
     { key: 'website', label: 'Website' },
     { key: 'phone_number', label: 'Phone Number' },
     { key: 'industry_type', label: 'Industry Type' },
-    { key: 'maps_url', label: 'Maps Link' }
+    { key: 'crawl_tier', label: 'Crawl Tier' },
+    { key: 'crawl_score', label: 'Crawl Score' },
+    { key: 'crawl_reason', label: 'Crawl Reason' },
+    { key: 'crawl_evidence', label: 'Crawl Evidence' },
+    { key: 'detected_language', label: 'Detected Language' },
+    { key: 'positive_concepts', label: 'Positive Concepts' },
+    { key: 'negative_concepts', label: 'Negative Concepts' },
+    { key: 'business_role', label: 'Business Role' },
+    { key: 'business_role_reason', label: 'Role Reason' },
+    { key: 'llm_fallback_status', label: 'LLM Fallback' },
+    { key: 'source_query', label: 'Source Query' },
+    { key: 'source_query_language', label: 'Query Language' },
+    { key: 'website_signal', label: 'Website Signal' },
+    { key: 'maps_url', label: 'Google Maps URL' }
 ];
+
+const TIER_FILTERS = [
+    { key: 'all', label: 'All' },
+    { key: 'best', label: 'Best' },
+    { key: 'strong', label: 'Strong' },
+    { key: 'weak', label: 'Weak' },
+    { key: 'reject', label: 'Reject' },
+    { key: 'unknown', label: 'Unknown' },
+];
+
+const ROLE_FILTERS = [
+    { key: 'all', label: 'All Roles' },
+    { key: 'end_user_operator', label: 'End-user' },
+    { key: 'industrial_service_contractor', label: 'Service Contractor' },
+    { key: 'epc_contractor', label: 'EPC' },
+    { key: 'supplier_distributor', label: 'Supplier/Distributor' },
+    { key: 'competitor_manufacturer', label: 'Competitor' },
+    { key: 'generic_local_service', label: 'Generic Service' },
+    { key: 'unknown', label: 'Unknown Role' },
+];
+
+function formatEvidence(value) {
+    if (!value || value.length === 0) return '-';
+    const text = Array.isArray(value) ? value.join('; ') : String(value);
+    return text.length > 180 ? `${text.slice(0, 180)}...` : text;
+}
 
 export default function Results() {
     const { id } = useParams();
@@ -24,6 +63,8 @@ export default function Results() {
     const [loading, setLoading] = useState(true);
     const [showExportPicker, setShowExportPicker] = useState(false);
     const [selectedColumns, setSelectedColumns] = useState(DEFAULT_COLUMNS.map(column => column.key));
+    const [tierFilter, setTierFilter] = useState('all');
+    const [roleFilter, setRoleFilter] = useState('all');
 
     React.useEffect(() => {
         fetchSearch(id).then(data => {
@@ -36,6 +77,14 @@ export default function Results() {
     }, [id, navigate, refreshQuota]);
 
     const businesses = searchData?.businesses || [];
+    const filteredBusinesses = useMemo(
+        () => businesses.filter(business => {
+            const tierMatch = tierFilter === 'all' || (business.crawl_tier || 'unknown') === tierFilter;
+            const roleMatch = roleFilter === 'all' || (business.business_role || 'unknown') === roleFilter;
+            return tierMatch && roleMatch;
+        }),
+        [businesses, tierFilter, roleFilter]
+    );
     const quotaLimited = searchData?.status === 'completed_quota_limited';
     const rateLimited = searchData?.status === 'completed_rate_limited';
     const failed = searchData?.status === 'failed';
@@ -46,7 +95,9 @@ export default function Results() {
     };
 
     const handleDownload = async (format) => {
-        await downloadFile(id, format, exportColumns.map(column => column.label));
+        const selectedTiers = tierFilter === 'all' ? [] : [tierFilter];
+        const selectedRoles = roleFilter === 'all' ? [] : [roleFilter];
+        await downloadFile(id, format, exportColumns.map(column => column.label), selectedTiers, selectedRoles);
         setShowExportPicker(false);
     };
 
@@ -60,7 +111,11 @@ export default function Results() {
                     <div className="flex flex-wrap items-center justify-between gap-4">
                         <div>
                             <h2 className="text-3xl font-semibold tracking-tight">{t('results.title')}</h2>
-                            <p className="mt-2 text-sm text-slate-100/90">{t('results.found', { count: formatNumber(searchData.total_results || 0) })}</p>
+                            <p className="mt-2 text-sm text-slate-100/90">
+                                {t('results.found', { count: formatNumber(searchData.total_results || 0) })}
+                                {' · '}
+                                {t('results.creditsUsed', { count: formatNumber(searchData.place_details_calls_used || 0) })}
+                            </p>
                         </div>
                         <div className="flex flex-wrap gap-3">
                             <button onClick={() => setShowExportPicker(true)} className="inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/10 px-4 py-2 text-sm font-medium text-white backdrop-blur hover:bg-white/20">
@@ -88,8 +143,8 @@ export default function Results() {
                         <div className="flex gap-3">
                             <AlertTriangle className="h-5 w-5 text-rose-600" />
                             <div>
-                                <p className="text-sm font-semibold text-rose-900">This search failed because Google Places temporarily rate-limited requests.</p>
-                                <p className="mt-1 text-sm text-rose-800">Partial results were saved if any were found. Wait a few minutes, lower max results, then retry.</p>
+                                <p className="text-sm font-semibold text-rose-900">{t('results.rateLimitedTitle')}</p>
+                                <p className="mt-1 text-sm text-rose-800">{t('results.rateLimitedDetail')}</p>
                             </div>
                         </div>
                     </div>
@@ -100,14 +155,38 @@ export default function Results() {
                         <div className="flex gap-3">
                             <AlertTriangle className="h-5 w-5 text-rose-600" />
                             <div>
-                                <p className="text-sm font-semibold text-rose-900">This search failed before it could finish.</p>
-                                <p className="mt-1 text-sm text-rose-800">Start a smaller search and check the backend logs if it happens again.</p>
+                                <p className="text-sm font-semibold text-rose-900">{t('results.failedTitle')}</p>
+                                <p className="mt-1 text-sm text-rose-800">{t('results.failedDetail')}</p>
                             </div>
                         </div>
                     </div>
                 )}
 
                 <div className="overflow-x-auto px-8 pb-8">
+                    <div className="mb-4 flex flex-wrap gap-2">
+                        {TIER_FILTERS.map(filter => (
+                            <button
+                                key={filter.key}
+                                type="button"
+                                onClick={() => setTierFilter(filter.key)}
+                                className={`rounded-full border px-4 py-2 text-sm font-medium transition ${tierFilter === filter.key ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-200 bg-white text-slate-600 hover:border-blue-300 hover:text-blue-600'}`}
+                            >
+                                {filter.label}
+                            </button>
+                        ))}
+                    </div>
+                    <div className="mb-4 flex flex-wrap gap-2">
+                        {ROLE_FILTERS.map(filter => (
+                            <button
+                                key={filter.key}
+                                type="button"
+                                onClick={() => setRoleFilter(filter.key)}
+                                className={`rounded-full border px-4 py-2 text-sm font-medium transition ${roleFilter === filter.key ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-slate-200 bg-white text-slate-600 hover:border-indigo-300 hover:text-indigo-600'}`}
+                            >
+                                {filter.label}
+                            </button>
+                        ))}
+                    </div>
                     <table className="min-w-full divide-y divide-slate-200 rounded-2xl border border-slate-200">
                         <thead className="bg-slate-50">
                             <tr>
@@ -119,7 +198,7 @@ export default function Results() {
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-200 bg-white">
-                            {businesses.map((business, index) => (
+                            {filteredBusinesses.map((business, index) => (
                                 <tr key={index} className="hover:bg-slate-50">
                                     <td className="px-6 py-4 text-sm text-slate-600">LeadDiscovery</td>
                                     <td className="px-6 py-4 text-sm font-medium text-slate-900">{business.name}</td>
@@ -129,12 +208,25 @@ export default function Results() {
                                     </td>
                                     <td className="px-6 py-4 text-sm text-slate-600">{business.phone_number || '-'}</td>
                                     <td className="px-6 py-4 text-sm text-slate-600">{business.industry_type || '-'}</td>
+                                    <td className="px-6 py-4 text-sm font-semibold capitalize text-slate-700">{business.crawl_tier || 'unknown'}</td>
+                                    <td className="px-6 py-4 text-sm text-slate-600">{business.crawl_score ?? '-'}</td>
+                                    <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{business.crawl_reason || '-'}</td>
+                                    <td className="max-w-sm px-6 py-4 text-sm text-slate-600">{formatEvidence(business.crawl_evidence)}</td>
+                                    <td className="px-6 py-4 text-sm text-slate-600">{business.detected_language || '-'}</td>
+                                    <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{formatEvidence(business.positive_concepts)}</td>
+                                    <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{formatEvidence(business.negative_concepts)}</td>
+                                    <td className="px-6 py-4 text-sm font-medium text-slate-700">{business.business_role || '-'}</td>
+                                    <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{business.business_role_reason || '-'}</td>
+                                    <td className="px-6 py-4 text-sm text-slate-600">{business.llm_fallback_status || '-'}</td>
+                                    <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{business.source_query || '-'}</td>
+                                    <td className="px-6 py-4 text-sm text-slate-600">{business.source_query_language || '-'}</td>
+                                    <td className="px-6 py-4 text-sm text-slate-600">{business.website_signal || '-'}</td>
                                     <td className="px-6 py-4 text-sm text-blue-600 hover:underline">
                                         {business.maps_url ? <a href={business.maps_url} target="_blank" rel="noreferrer">Maps</a> : '-'}
                                     </td>
                                 </tr>
                             ))}
-                            {businesses.length === 0 && (
+                            {filteredBusinesses.length === 0 && (
                                 <tr>
                                     <td colSpan={DEFAULT_COLUMNS.length} className="px-6 py-8 text-center text-slate-500">{t('results.noBusinesses')}</td>
                                 </tr>

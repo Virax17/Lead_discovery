@@ -76,6 +76,9 @@ export default function Progress() {
                     <span>{t('progress.keywords', { completed: formatNumber(statusData.keywords_completed), total: formatNumber(statusData.keywords_total) })}</span>
                     <span>{t('progress.found', { count: formatNumber(statusData.total_results) })}</span>
                 </div>
+                <p className="mt-3 text-sm text-gray-500">
+                    {t('progress.creditsUsedSoFar', { count: formatNumber(statusData.place_details_calls_used || 0) })}
+                </p>
             </div>
         </div>
     );

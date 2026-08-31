@@ -1,5 +1,6 @@
 import httpx
 import asyncio
+from app.config.crawl_concepts import LOCALIZED_QUERY_TERMS
 from app.config.settings import settings
 from app.config.places_fields import TEXT_SEARCH_FIELD_MASK, PLACE_DETAILS_FIELD_MASK
 from app.config.retry import MAX_RETRIES, BACKOFF_SECONDS
@@ -20,14 +21,34 @@ class GoogleRateLimitedError(Exception):
 BUSINESS_SEARCH_VARIANTS = [
     "{keyword} in {location}",
     "{keyword} companies in {location}",
-    "{keyword} suppliers in {location}",
     "{keyword} services in {location}",
+    "{keyword} contractors in {location}",
+    "{keyword} maintenance companies in {location}",
 ]
 
 INDUSTRY_SEARCH_VARIANTS = [
     "{keyword} for {industry} in {location}",
-    "{industry} {keyword} companies in {location}",
+    "{industry} {keyword} contractors in {location}",
+    "{industry} maintenance companies in {location}",
+    "{industry} plant services in {location}",
 ]
+
+COUNTRY_QUERY_LANGUAGES = {
+    "ES": ["es"],
+    "MX": ["es"],
+    "AR": ["es"],
+    "CL": ["es"],
+    "CO": ["es"],
+    "PE": ["es"],
+    "FR": ["fr"],
+    "BE": ["fr"],
+    "CA": ["fr"],
+    "BR": ["pt"],
+    "PT": ["pt"],
+    "DE": ["de"],
+    "AT": ["de"],
+    "CH": ["de", "fr"],
+}
 
 
 def _country_code_from_components(address_components: list[dict]) -> str | None:
@@ -37,33 +58,59 @@ def _country_code_from_components(address_components: list[dict]) -> str | None:
     return None
 
 
-def _details_from_place_payload(place: dict) -> PlaceDetails:
+def _details_from_place_payload(place: dict, source_query: str | None = None) -> PlaceDetails:
     return PlaceDetails(
         name=place.get("displayName", {}).get("text", "Unknown"),
         address=place.get("formattedAddress", "Unknown"),
         website=_clean_url(place.get("websiteUri")),
         phone_number=place.get("internationalPhoneNumber"),
         country_code=_country_code_from_components(place.get("addressComponents", [])),
+        google_types=place.get("types", []),
+        google_primary_type=place.get("primaryType"),
+        google_primary_type_display_name=place.get("primaryTypeDisplayName", {}).get("text"),
+        google_business_status=place.get("businessStatus"),
+        google_maps_uri=place.get("googleMapsUri"),
+        source_query=source_query,
+        source_query_language=_detect_query_language(source_query),
     )
 
 
-def _build_text_queries(keyword: str, location: str, industries: list[str] | None = None) -> list[str]:
-    queries: list[str] = []
+def _detect_query_language(query: str | None) -> str:
+    if not query:
+        return "en"
+    normalized = query.lower()
+    for language, terms in LOCALIZED_QUERY_TERMS.items():
+        if any(term.lower() in normalized for term in terms):
+            return language
+    return "en"
+
+
+def _build_text_queries(keyword: str, location: str, industries: list[str] | None = None, country_code: str | None = None) -> list[tuple[str, str]]:
+    queries: list[tuple[str, str]] = []
     seen: set[str] = set()
 
-    def add(template: str, **kwargs):
-        query = template.format(**kwargs).strip()
+    def add(query: str, language: str = "en"):
+        query = query.strip()
         normalized = " ".join(query.lower().split())
         if query and normalized not in seen:
             seen.add(normalized)
-            queries.append(query)
+            queries.append((query, language))
+
+    def add_template(template: str, language: str = "en", **kwargs):
+        query = template.format(**kwargs).strip()
+        add(query, language)
 
     for template in BUSINESS_SEARCH_VARIANTS:
-        add(template, keyword=keyword, location=location)
+        add_template(template, keyword=keyword, location=location)
 
     for industry in (industries or [])[:3]:
         for template in INDUSTRY_SEARCH_VARIANTS:
-            add(template, keyword=keyword, industry=industry, location=location)
+            add_template(template, keyword=keyword, industry=industry, location=location)
+
+    for language in COUNTRY_QUERY_LANGUAGES.get((country_code or "").upper(), []):
+        for term in LOCALIZED_QUERY_TERMS.get(language, []):
+            add(f"{term} in {location}", language)
+            add(f"{term} {location}", language)
 
     return queries
 
@@ -85,7 +132,7 @@ async def text_search_places(
     # Build query
     location_parts = [city, state, country]
     location = ", ".join(filter(None, location_parts))
-    queries = _build_text_queries(keyword, location, industries)
+    queries = _build_text_queries(keyword, location, industries, country_code)
 
     max_results = min(max_results, 100)
 
@@ -101,7 +148,7 @@ async def text_search_places(
     calls_used = 0
 
     async with httpx.AsyncClient(timeout=20.0) as client:
-        for query in queries:
+        for query, query_language in queries:
             page_token = None
             while len(results) < max_results:
                 payload = {
@@ -131,7 +178,9 @@ async def text_search_places(
                         place_id = p.get("id")
                         if place_id and place_id not in seen_place_ids:
                             seen_place_ids.add(place_id)
-                            results.append((place_id, _details_from_place_payload(p)))
+                            details = _details_from_place_payload(p, source_query=query)
+                            details.source_query_language = query_language
+                            results.append((place_id, details))
                             if len(results) >= max_results:
                                 break
 
@@ -195,7 +244,12 @@ async def get_place_details(place_id: str, username: str | None = None) -> Place
                     address=data.get("formattedAddress", "Unknown"),
                     website=_clean_url(data.get("websiteUri")),
                     phone_number=data.get("internationalPhoneNumber"),
-                    country_code=_country_code_from_components(data.get("addressComponents", []))
+                    country_code=_country_code_from_components(data.get("addressComponents", [])),
+                    google_types=data.get("types", []),
+                    google_primary_type=data.get("primaryType"),
+                    google_primary_type_display_name=data.get("primaryTypeDisplayName", {}).get("text"),
+                    google_business_status=data.get("businessStatus"),
+                    google_maps_uri=data.get("googleMapsUri"),
                 )
             except GoogleRateLimitedError:
                 raise

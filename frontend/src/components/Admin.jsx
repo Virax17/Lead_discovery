@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Shield, Plus, KeyRound, Ban, CheckCircle2, Globe, X, Users as UsersIcon, Wrench } from 'lucide-react';
-import { createAdminUser, fetchAdminUsers, updateAdminUserPassword, updateAdminUserActive, normalizeAdminCountries } from '../api';
+import { Shield, Plus, KeyRound, Ban, CheckCircle2, Globe, X, Users as UsersIcon, Wrench, BarChart3 } from 'lucide-react';
+import { createAdminUser, fetchAdminUsers, fetchAdminUsageStats, fetchAdminLlmUsageStats, updateAdminUserPassword, updateAdminUserActive, normalizeAdminCountries } from '../api';
 import { useI18n } from '../i18n/I18nContext';
 import { useShell } from '../context/ShellContext';
 
@@ -49,6 +49,12 @@ export default function Admin() {
     const [passwordDraft, setPasswordDraft] = useState('');
     const [busyUsername, setBusyUsername] = useState(null);
     const [normalizing, setNormalizing] = useState(false);
+    const [usageStats, setUsageStats] = useState(null);
+    const [usageLoading, setUsageLoading] = useState(true);
+    const [usageError, setUsageError] = useState('');
+    const [llmUsageStats, setLlmUsageStats] = useState(null);
+    const [llmUsageLoading, setLlmUsageLoading] = useState(true);
+    const [llmUsageError, setLlmUsageError] = useState('');
 
     useEffect(() => {
         if (currentUser && currentUser.role !== 'admin') {
@@ -65,6 +71,26 @@ export default function Admin() {
             setError(t('admin.failedLoadUsers'));
         }).finally(() => {
             if (active) setLoading(false);
+        });
+
+        fetchAdminUsageStats().then(data => {
+            if (!active) return;
+            setUsageStats(data);
+        }).catch(() => {
+            if (!active) return;
+            setUsageError(t('admin.usageStats.failedLoadStats'));
+        }).finally(() => {
+            if (active) setUsageLoading(false);
+        });
+
+        fetchAdminLlmUsageStats().then(data => {
+            if (!active) return;
+            setLlmUsageStats(data);
+        }).catch(() => {
+            if (!active) return;
+            setLlmUsageError(t('admin.llmUsageStats.failedLoadStats'));
+        }).finally(() => {
+            if (active) setLlmUsageLoading(false);
         });
 
         return () => {
@@ -182,6 +208,10 @@ export default function Admin() {
                         <Wrench className="h-4 w-4" />
                         {t('admin.maintenanceTab')}
                     </button>
+                    <button type="button" onClick={() => setTab('usage')} className={tabButtonClass('usage')}>
+                        <BarChart3 className="h-4 w-4" />
+                        {t('admin.usageTab')}
+                    </button>
                 </div>
 
                 {(error || message) && (
@@ -298,6 +328,121 @@ export default function Admin() {
                                 {normalizing ? t('admin.merging') : t('admin.mergeCountries')}
                             </button>
                         </div>
+                    </div>
+                )}
+
+                {tab === 'usage' && (
+                    <div className="p-8">
+                        {usageLoading ? (
+                            <p className="text-sm text-slate-500">{t('common.loading')}</p>
+                        ) : usageError ? (
+                            <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{usageError}</div>
+                        ) : usageStats ? (
+                            <div className="space-y-6">
+                                <div>
+                                    <h3 className="text-lg font-semibold text-slate-900">{t('admin.usageStats.title')}</h3>
+                                    <p className="mt-1 text-sm text-slate-500">{t('admin.usageStats.subtitle')}</p>
+                                </div>
+
+                                <div className="rounded-2xl border border-blue-100 bg-blue-50 p-5">
+                                    <p className="text-sm font-semibold text-blue-900">{t('admin.usageStats.whatAreCredits')}</p>
+                                    <p className="mt-1 text-sm text-blue-800">{t('admin.usageStats.whatAreCreditsBody')}</p>
+                                </div>
+
+                                <div className="grid gap-4 sm:grid-cols-3">
+                                    <div className="rounded-2xl border border-slate-200 p-5">
+                                        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">{t('admin.usageStats.creditsUsedThisMonth')}</p>
+                                        <p className="mt-2 text-2xl font-semibold text-slate-900">
+                                            {formatNumber(usageStats.credits_used)} / {formatNumber(usageStats.credits_limit)}
+                                        </p>
+                                    </div>
+                                    <div className="rounded-2xl border border-slate-200 p-5">
+                                        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">{t('admin.usageStats.companiesFoundThisMonth')}</p>
+                                        <p className="mt-2 text-2xl font-semibold text-slate-900">{formatNumber(usageStats.companies_found)}</p>
+                                    </div>
+                                    <div className="rounded-2xl border border-slate-200 p-5">
+                                        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">{t('admin.usageStats.avgCostPerCompany')}</p>
+                                        <p className="mt-2 text-2xl font-semibold text-slate-900">
+                                            {usageStats.avg_credits_per_company !== null
+                                                ? t('admin.usageStats.avgCostValue', { count: usageStats.avg_credits_per_company })
+                                                : t('admin.usageStats.notEnoughData')}
+                                        </p>
+                                        {usageStats.avg_credits_per_company !== null && (
+                                            <p className="mt-2 text-xs text-slate-500">
+                                                {t('admin.usageStats.avgCostHint', { count: usageStats.avg_credits_per_company })}
+                                            </p>
+                                        )}
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <h4 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">{t('admin.usageStats.statusBreakdownTitle')}</h4>
+                                    {usageStats.total_searches === 0 ? (
+                                        <p className="mt-3 text-sm text-slate-500">{t('admin.usageStats.noSearches')}</p>
+                                    ) : (
+                                        <div className="mt-3 space-y-3">
+                                            {['completed', 'completed_quota_limited', 'completed_rate_limited', 'failed'].map(key => {
+                                                const bucket = usageStats.status_breakdown[key];
+                                                if (!bucket || bucket.search_count === 0) return null;
+                                                return (
+                                                    <div key={key} className="rounded-2xl border border-slate-200 p-4">
+                                                        <div className="flex flex-wrap items-center justify-between gap-2">
+                                                            <p className="text-sm font-semibold text-slate-900">{t(`admin.usageStats.statusLabel.${key}`)}</p>
+                                                            <p className="text-xs text-slate-500">
+                                                                {t('admin.usageStats.searchCount', { count: formatNumber(bucket.search_count) })}
+                                                                {' · '}
+                                                                {t('admin.usageStats.companiesFound', { count: formatNumber(bucket.companies_found) })}
+                                                                {' · '}
+                                                                {t('admin.usageStats.creditsUsed', { count: formatNumber(bucket.credits_used) })}
+                                                            </p>
+                                                        </div>
+                                                        <p className="mt-1 text-sm text-slate-600">{t(`admin.usageStats.statusExplain.${key}`)}</p>
+                                                    </div>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                </div>
+
+                                <div>
+                                    <h4 className="text-sm font-semibold uppercase tracking-[0.2em] text-slate-500">{t('admin.llmUsageStats.title')}</h4>
+                                    <p className="mt-1 text-sm text-slate-500">{t('admin.llmUsageStats.subtitle')}</p>
+                                    {llmUsageLoading ? (
+                                        <p className="mt-3 text-sm text-slate-500">{t('common.loading')}</p>
+                                    ) : llmUsageError ? (
+                                        <div className="mt-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">{llmUsageError}</div>
+                                    ) : llmUsageStats && Object.keys(llmUsageStats.providers || {}).length === 0 ? (
+                                        <p className="mt-3 text-sm text-slate-500">{t('admin.llmUsageStats.noCalls')}</p>
+                                    ) : llmUsageStats ? (
+                                        <div className="mt-3 space-y-3">
+                                            {Object.entries(llmUsageStats.providers).map(([provider, bucket]) => (
+                                                <div key={provider} className="rounded-2xl border border-slate-200 p-4">
+                                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                                        <p className="text-sm font-semibold capitalize text-slate-900">{provider}</p>
+                                                        <p className="text-xs text-slate-500">
+                                                            {t('admin.llmUsageStats.calls', { count: formatNumber(bucket.calls) })}
+                                                            {' · '}
+                                                            {t('admin.llmUsageStats.success', { count: formatNumber(bucket.success) })}
+                                                            {' · '}
+                                                            {t('admin.llmUsageStats.failed', { count: formatNumber(bucket.failed) })}
+                                                        </p>
+                                                    </div>
+                                                    {bucket.failed > 0 && (
+                                                        <p className="mt-1 text-xs text-slate-500">
+                                                            {t('admin.llmUsageStats.failureBreakdown', {
+                                                                rateLimited: formatNumber(bucket.rate_limited),
+                                                                truncated: formatNumber(bucket.truncated_or_malformed),
+                                                                other: formatNumber(bucket.other_error),
+                                                            })}
+                                                        </p>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    ) : null}
+                                </div>
+                            </div>
+                        ) : null}
                     </div>
                 )}
             </div>

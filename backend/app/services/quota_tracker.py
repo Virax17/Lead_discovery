@@ -77,3 +77,55 @@ async def get_current_usage(username: str | None = None) -> dict:
         "overage_cost_estimate": max(0, calls - PLACE_DETAILS_MONTHLY_FREE_LIMIT) * 0.02,
         "user": user_summary,
     }
+
+async def get_admin_usage_stats() -> dict:
+    """Aggregates this month's searches into plain-language usage statistics for the admin portal."""
+    db = get_db()
+    year_month = _current_month_str()
+    start = datetime.strptime(year_month, "%Y-%m")
+    end = start.replace(year=start.year + 1, month=1) if start.month == 12 else start.replace(month=start.month + 1)
+
+    pipeline = [
+        {"$match": {"created_at": {"$gte": start, "$lt": end}}},
+        {"$group": {
+            "_id": "$status",
+            "search_count": {"$sum": 1},
+            "companies_found": {"$sum": "$total_results"},
+            "credits_used": {"$sum": "$place_details_calls_used"},
+        }},
+    ]
+    rows = await db.searches.aggregate(pipeline).to_list(length=None)
+    by_status = {r["_id"]: r for r in rows}
+
+    total_companies = sum(r["companies_found"] for r in rows)
+    total_credits_from_searches = sum(r["credits_used"] for r in rows)
+
+    def bucket(key: str) -> dict:
+        row = by_status.get(key)
+        return {
+            "search_count": row["search_count"] if row else 0,
+            "companies_found": row["companies_found"] if row else 0,
+            "credits_used": row["credits_used"] if row else 0,
+        }
+
+    return {
+        "year_month": year_month,
+        # Derived from the same searches rows as status_breakdown below, so the
+        # headline total always equals the sum of the breakdown - intentionally not
+        # reusing get_current_usage()'s global counter here, since that counter can
+        # drift from the sum of individual search records (pre-existing data from
+        # older code revisions) and showing two different "credits used" numbers on
+        # one page would be confusing.
+        "credits_used": total_credits_from_searches,
+        "credits_limit": PLACE_DETAILS_MONTHLY_FREE_LIMIT,
+        "companies_found": total_companies,
+        "avg_credits_per_company": round(total_credits_from_searches / total_companies, 1) if total_companies else None,
+        "total_searches": sum(r["search_count"] for r in rows),
+        "status_breakdown": {
+            "completed": bucket("completed"),
+            "completed_quota_limited": bucket("completed_quota_limited"),
+            "completed_rate_limited": bucket("completed_rate_limited"),
+            "failed": bucket("failed"),
+            "running": bucket("running"),
+        },
+    }

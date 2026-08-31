@@ -42,15 +42,29 @@ async def list_populated_countries(current_user: str = Depends(get_current_user)
 async def list_businesses(
     country: str = Query(..., description="Country name, e.g. 'India'"),
     page: int = Query(1, ge=1),
+    crawl_tier: Optional[str] = None,
+    business_role: Optional[str] = None,
     current_user: str = Depends(get_current_user),
 ):
     db = get_db()
     country, _country_code = normalize_country(country)
     skip = (page - 1) * PAGE_SIZE
 
-    total = await db.master_businesses.count_documents({"country": country})
+    query = {"country": country}
+    if crawl_tier and crawl_tier != "all":
+        if crawl_tier == "unknown":
+            query["$or"] = [{"crawl_tier": "unknown"}, {"crawl_tier": {"$exists": False}}, {"crawl_tier": None}]
+        else:
+            query["crawl_tier"] = crawl_tier
+    if business_role and business_role != "all":
+        if business_role == "unknown":
+            query["business_role"] = {"$in": ["unknown", None]}
+        else:
+            query["business_role"] = business_role
+
+    total = await db.master_businesses.count_documents(query)
     cursor = (
-        db.master_businesses.find({"country": country})
+        db.master_businesses.find(query)
         .sort("last_seen_at", -1)
         .skip(skip)
         .limit(PAGE_SIZE)
@@ -76,14 +90,16 @@ async def list_businesses(
 async def export_businesses(
     country: str = Query(..., description="Country name, e.g. 'India'"),
     format: str = "xlsx",
-    selected_columns: Optional[List[str]] = None,
+    selected_columns: Optional[List[str]] = Query(None),
+    selected_tiers: Optional[List[str]] = Query(None),
+    selected_roles: Optional[List[str]] = Query(None),
     current_user: str = Depends(get_current_user),
 ):
     country, _country_code = normalize_country(country)
     if format not in ["xlsx", "csv"]:
         raise HTTPException(status_code=400, detail="Format must be xlsx or csv")
 
-    stored_filename = await export_country(country, format, selected_columns=selected_columns)
+    stored_filename = await export_country(country, format, selected_columns=selected_columns, selected_tiers=selected_tiers, selected_roles=selected_roles)
     if not stored_filename:
         raise HTTPException(status_code=404, detail="Export failed or not found")
 

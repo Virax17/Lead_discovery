@@ -78,7 +78,7 @@ export default function History() {
 
                                         <div className="mt-2 flex flex-wrap items-center justify-between gap-3">
                                             <p className="text-sm text-slate-500">
-                                                {t('history.results', { count: formatNumber(search.total_results || 0) })} · {formatDate(search.created_at)}
+                                                {t('history.results', { count: formatNumber(search.total_results || 0) })} · {t('history.credits', { count: formatNumber(search.place_details_calls_used || 0) })} · {formatDate(search.created_at)}
                                             </p>
 
                                             <div className="flex items-center gap-4">

@@ -12,6 +12,29 @@ function getHeaders() {
     return headers;
 }
 
+function redirectToLogin() {
+    localStorage.removeItem("token");
+    if (typeof window !== "undefined" && !window.location.pathname.startsWith("/login")) {
+        window.location.href = "/login";
+    }
+}
+
+// Every authenticated request goes through here so an expired/invalid token
+// (backend returns 401) clears the stale token and sends the user back to
+// login immediately, instead of leaving the app rendered with silently
+// failing requests (each caller's own catch block otherwise just shows an
+// empty/generic state with no explanation of why).
+async function authorizedFetch(url, options = {}) {
+    const res = await fetch(url, {
+        ...options,
+        headers: { ...getHeaders(), ...(options.headers || {}) },
+    });
+    if (res.status === 401) {
+        redirectToLogin();
+    }
+    return res;
+}
+
 export async function login(username, password) {
     const formData = new URLSearchParams();
     formData.append("username", username);
@@ -40,7 +63,7 @@ export function logout() {
 }
 
 export async function fetchQuota() {
-    const res = await fetch(`${API_BASE}/quota/status`, { headers: getHeaders() });
+    const res = await authorizedFetch(`${API_BASE}/quota/status`);
     if (!res.ok) {
         if (res.status === 401) throw new Error("Unauthorized");
         throw new Error("Failed to fetch quota");
@@ -49,15 +72,26 @@ export async function fetchQuota() {
 }
 
 export async function fetchAdminUsers() {
-    const res = await fetch(`${API_BASE}/admin/users`, { headers: getHeaders() });
+    const res = await authorizedFetch(`${API_BASE}/admin/users`);
     if (!res.ok) throw new Error("Failed to fetch users");
     return res.json();
 }
 
+export async function fetchAdminUsageStats() {
+    const res = await authorizedFetch(`${API_BASE}/admin/usage-stats`);
+    if (!res.ok) throw new Error("Failed to fetch usage statistics");
+    return res.json();
+}
+
+export async function fetchAdminLlmUsageStats() {
+    const res = await authorizedFetch(`${API_BASE}/admin/llm-usage-stats`);
+    if (!res.ok) throw new Error("Failed to fetch LLM usage statistics");
+    return res.json();
+}
+
 export async function createAdminUser(payload) {
-    const res = await fetch(`${API_BASE}/admin/users`, {
+    const res = await authorizedFetch(`${API_BASE}/admin/users`, {
         method: "POST",
-        headers: getHeaders(),
         body: JSON.stringify(payload),
     });
     if (!res.ok) {
@@ -68,9 +102,8 @@ export async function createAdminUser(payload) {
 }
 
 export async function updateAdminUserPassword(username, password) {
-    const res = await fetch(`${API_BASE}/admin/users/${encodeURIComponent(username)}/password`, {
+    const res = await authorizedFetch(`${API_BASE}/admin/users/${encodeURIComponent(username)}/password`, {
         method: "PUT",
-        headers: getHeaders(),
         body: JSON.stringify({ password }),
     });
     if (!res.ok) {
@@ -81,9 +114,8 @@ export async function updateAdminUserPassword(username, password) {
 }
 
 export async function normalizeAdminCountries() {
-    const res = await fetch(`${API_BASE}/admin/normalize-countries`, {
+    const res = await authorizedFetch(`${API_BASE}/admin/normalize-countries`, {
         method: "POST",
-        headers: getHeaders(),
     });
     if (!res.ok) {
         const data = await res.json().catch(() => null);
@@ -93,9 +125,8 @@ export async function normalizeAdminCountries() {
 }
 
 export async function updateAdminUserActive(username, active) {
-    const res = await fetch(`${API_BASE}/admin/users/${encodeURIComponent(username)}/active`, {
+    const res = await authorizedFetch(`${API_BASE}/admin/users/${encodeURIComponent(username)}/active`, {
         method: "PUT",
-        headers: getHeaders(),
         body: JSON.stringify({ active }),
     });
     if (!res.ok) {
@@ -106,32 +137,50 @@ export async function updateAdminUserActive(username, active) {
 }
 
 export async function fetchCountries() {
-    const res = await fetch(`${API_BASE}/countries`, { headers: getHeaders() });
+    const res = await authorizedFetch(`${API_BASE}/countries`);
     if (!res.ok) throw new Error("Failed to fetch countries");
     return res.json();
 }
 
+export async function fetchStates(countryCode) {
+    const params = new URLSearchParams({ country_code: countryCode });
+    const res = await authorizedFetch(`${API_BASE}/geo/states?${params.toString()}`);
+    if (!res.ok) throw new Error("Failed to fetch states");
+    return res.json();
+}
+
+export async function fetchCities(countryCode, stateCode) {
+    const params = new URLSearchParams({ country_code: countryCode, state_code: stateCode });
+    const res = await authorizedFetch(`${API_BASE}/geo/cities?${params.toString()}`);
+    if (!res.ok) throw new Error("Failed to fetch cities");
+    return res.json();
+}
+
 export async function fetchPopulatedCountries() {
-    const res = await fetch(`${API_BASE}/businesses/countries`, { headers: getHeaders() });
+    const res = await authorizedFetch(`${API_BASE}/businesses/countries`);
     if (!res.ok) throw new Error("Failed to fetch countries with data");
     return res.json();
 }
 
-export async function fetchCountryBusinesses(country, page = 1) {
+export async function fetchCountryBusinesses(country, page = 1, crawlTier = "all", businessRole = "all") {
     const params = new URLSearchParams({ country, page });
-    const res = await fetch(`${API_BASE}/businesses?${params.toString()}`, { headers: getHeaders() });
+    if (crawlTier && crawlTier !== "all") params.append("crawl_tier", crawlTier);
+    if (businessRole && businessRole !== "all") params.append("business_role", businessRole);
+    const res = await authorizedFetch(`${API_BASE}/businesses?${params.toString()}`);
     if (!res.ok) throw new Error("Failed to fetch country businesses");
     return res.json();
 }
 
-export function getCountryExportUrl(country, format, selectedColumns = []) {
+export function getCountryExportUrl(country, format, selectedColumns = [], selectedTiers = [], selectedRoles = []) {
     const params = new URLSearchParams({ country, format });
     selectedColumns.forEach(column => params.append("selected_columns", column));
+    selectedTiers.forEach(tier => params.append("selected_tiers", tier));
+    selectedRoles.forEach(role => params.append("selected_roles", role));
     return `${API_BASE}/businesses/export?${params.toString()}`;
 }
 
-export async function downloadCountryExport(country, format, selectedColumns = []) {
-    const res = await fetch(getCountryExportUrl(country, format, selectedColumns), { headers: getHeaders() });
+export async function downloadCountryExport(country, format, selectedColumns = [], selectedTiers = [], selectedRoles = []) {
+    const res = await authorizedFetch(getCountryExportUrl(country, format, selectedColumns, selectedTiers, selectedRoles));
     if (!res.ok) throw new Error("Download failed");
 
     const blob = await res.blob();
@@ -146,9 +195,8 @@ export async function downloadCountryExport(country, format, selectedColumns = [
 }
 
 export async function createSearch(payload) {
-    const res = await fetch(`${API_BASE}/searches`, {
+    const res = await authorizedFetch(`${API_BASE}/searches`, {
         method: "POST",
-        headers: getHeaders(),
         body: JSON.stringify(payload)
     });
     if (!res.ok) throw new Error("Failed to create search");
@@ -156,7 +204,7 @@ export async function createSearch(payload) {
 }
 
 export async function fetchSearch(id) {
-    const res = await fetch(`${API_BASE}/searches/${id}`, { headers: getHeaders() });
+    const res = await authorizedFetch(`${API_BASE}/searches/${id}`);
     if (!res.ok) throw new Error("Failed to fetch search");
     return res.json();
 }
@@ -166,19 +214,21 @@ export async function fetchHistory(page = 1, pageSize = 20) {
         page: String(page),
         page_size: String(pageSize),
     });
-    const res = await fetch(`${API_BASE}/searches?${params.toString()}`, { headers: getHeaders() });
+    const res = await authorizedFetch(`${API_BASE}/searches?${params.toString()}`);
     if (!res.ok) throw new Error("Failed to fetch history");
     return res.json();
 }
 
-export function getExportUrl(id, format, selectedColumns = []) {
+export function getExportUrl(id, format, selectedColumns = [], selectedTiers = [], selectedRoles = []) {
     const params = new URLSearchParams({ format });
     selectedColumns.forEach(column => params.append("selected_columns", column));
+    selectedTiers.forEach(tier => params.append("selected_tiers", tier));
+    selectedRoles.forEach(role => params.append("selected_roles", role));
     return `${API_BASE}/searches/${id}/export?${params.toString()}`;
 }
 
-export async function downloadFile(id, format, selectedColumns = []) {
-    const res = await fetch(getExportUrl(id, format, selectedColumns), { headers: getHeaders() });
+export async function downloadFile(id, format, selectedColumns = [], selectedTiers = [], selectedRoles = []) {
+    const res = await authorizedFetch(getExportUrl(id, format, selectedColumns, selectedTiers, selectedRoles));
     if (!res.ok) throw new Error("Download failed");
     
     const blob = await res.blob();

@@ -134,7 +134,14 @@ async def list_searches(
     }
 
 @router.get("/{id}/export")
-async def download_export(id: str, format: str = "xlsx", selected_columns: List[str] | None = None, current_user: dict = Depends(get_current_user_profile)):
+async def download_export(
+    id: str,
+    format: str = "xlsx",
+    selected_columns: List[str] | None = Query(None),
+    selected_tiers: List[str] | None = Query(None),
+    selected_roles: List[str] | None = Query(None),
+    current_user: dict = Depends(get_current_user_profile),
+):
     username = current_user["username"]
     is_admin = current_user.get("role") == "admin"
     db = get_db()
@@ -151,7 +158,7 @@ async def download_export(id: str, format: str = "xlsx", selected_columns: List[
     if format not in ["xlsx", "csv"]:
         raise HTTPException(status_code=400, detail="Format must be xlsx or csv")
 
-    stored_filename = await export_search(id, format, selected_columns=selected_columns)
+    stored_filename = await export_search(id, format, selected_columns=selected_columns, selected_tiers=selected_tiers, selected_roles=selected_roles)
     if not stored_filename:
         raise HTTPException(status_code=404, detail="Export failed or not found")
 

@@ -19,6 +19,20 @@ async def ensure_indexes():
 
     # master_businesses: index on country for fast country-wise browsing/export
     await db.master_businesses.create_index([("country", pymongo.ASCENDING)])
+    await db.master_businesses.create_index([("crawl_tier", pymongo.ASCENDING)])
+    await db.master_businesses.create_index([("crawl_version", pymongo.ASCENDING)])
+    await db.master_businesses.create_index([("source_query", pymongo.ASCENDING)])
+    await db.master_businesses.create_index([("detected_language", pymongo.ASCENDING)])
+    await db.master_businesses.create_index([("scoring_language", pymongo.ASCENDING)])
+    await db.master_businesses.create_index([("source_query_language", pymongo.ASCENDING)])
+    await db.master_businesses.create_index([("business_role", pymongo.ASCENDING)])
+
+    # rejected_businesses: unique index on place_id, so a business that failed
+    # the relevance check is never re-fetched or re-scanned on a later search.
+    await db.rejected_businesses.create_index(
+        [("place_id", pymongo.ASCENDING)],
+        unique=True
+    )
 
     # 2. search_results: compound unique index on (search_id, master_business_id)
     await db.search_results.create_index(

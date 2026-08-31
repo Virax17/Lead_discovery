@@ -32,8 +32,61 @@ class MasterBusiness(BaseModel):
     industry_sector: Optional[str] = None
     industry_type: Optional[str] = None
     customer_type: Optional[str] = None
+    website_signal: Optional[str] = None
+    source_query: Optional[str] = None
+    source_query_language: Optional[str] = None
+    source_keyword: Optional[str] = None
+    google_types: List[str] = Field(default_factory=list)
+    google_primary_type: Optional[str] = None
+    google_primary_type_display_name: Optional[str] = None
+    google_business_status: Optional[str] = None
+    crawl_status: Optional[str] = None
+    crawl_score: Optional[int] = None
+    crawl_tier: Optional[str] = None
+    crawl_pages_checked: int = 0
+    crawl_positive_signals: List[str] = Field(default_factory=list)
+    crawl_negative_signals: List[str] = Field(default_factory=list)
+    crawl_evidence: List[str] = Field(default_factory=list)
+    crawl_evidence_original: List[str] = Field(default_factory=list)
+    crawl_evidence_translated: List[str] = Field(default_factory=list)
+    crawl_evidence_urls: List[str] = Field(default_factory=list)
+    crawl_reason: Optional[str] = None
+    crawl_checked_at: Optional[datetime] = None
+    crawl_version: Optional[str] = None
+    detected_language: Optional[str] = None
+    language_confidence: Optional[float] = None
+    scoring_language: Optional[str] = None
+    matched_concepts: List[str] = Field(default_factory=list)
+    positive_concepts: List[str] = Field(default_factory=list)
+    negative_concepts: List[str] = Field(default_factory=list)
+    business_role: Optional[str] = None
+    business_role_score: Optional[int] = None
+    business_role_signals: List[str] = Field(default_factory=list)
+    business_role_negative_signals: List[str] = Field(default_factory=list)
+    business_role_reason: Optional[str] = None
+    scoring_version: Optional[str] = None
+    translation_status: Optional[str] = None
+    translation_provider: Optional[str] = None
+    translation_checked_at: Optional[datetime] = None
+    llm_fallback_status: Optional[str] = None
+    llm_fallback_provider: Optional[str] = None
+    llm_fallback_model: Optional[str] = None
+    llm_fallback_decision: Optional[str] = None
+    llm_fallback_confidence: Optional[float] = None
+    llm_fallback_reason: Optional[str] = None
+    llm_fallback_checked_at: Optional[datetime] = None
     first_found_at: datetime
     last_seen_at: datetime
+
+    model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
+
+class RejectedBusiness(BaseModel):
+    id: Optional[PyObjectId] = Field(alias="_id", default=None)
+    place_id: str
+    name: str
+    website: Optional[str] = None
+    reason: str
+    rejected_at: datetime
 
     model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
 
@@ -60,6 +113,8 @@ class SearchResult(BaseModel):
     search_id: PyObjectId
     master_business_id: PyObjectId
     matched_keyword: str
+    source_query: Optional[str] = None
+    source_query_language: Optional[str] = None
     details_status: str # 'ok', 'failed_after_retries'
     customer_type: Optional[str] = None
     created_at: datetime
@@ -114,6 +169,13 @@ class PlaceDetails(BaseModel):
     website: Optional[str] = None
     phone_number: Optional[str] = None
     country_code: Optional[str] = None
+    google_types: List[str] = Field(default_factory=list)
+    google_primary_type: Optional[str] = None
+    google_primary_type_display_name: Optional[str] = None
+    google_business_status: Optional[str] = None
+    google_maps_uri: Optional[str] = None
+    source_query: Optional[str] = None
+    source_query_language: Optional[str] = None
 
 class AppSettings(BaseModel):
     id: str = Field(alias="_id", default="singleton")
