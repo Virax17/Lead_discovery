@@ -30,6 +30,9 @@ async def create_search(search_in: SearchCreate, background_tasks: BackgroundTas
         country_code=country_code,
         state=search_in.state,
         city=search_in.city,
+        center_lat=search_in.center_lat,
+        center_lng=search_in.center_lng,
+        radius_km=search_in.radius_km,
         max_results=search_in.max_results,
         status="running",
         keywords_total=len(search_in.keywords),
@@ -46,6 +49,9 @@ async def create_search(search_in: SearchCreate, background_tasks: BackgroundTas
         country=country,
         state=search_in.state,
         city=search_in.city,
+        center_lat=search_in.center_lat,
+        center_lng=search_in.center_lng,
+        radius_km=search_in.radius_km,
         max_results=search_in.max_results,
         keywords=search_in.keywords,
         industries=search_in.industries,
@@ -54,6 +60,34 @@ async def create_search(search_in: SearchCreate, background_tasks: BackgroundTas
     )
 
     return {"search_id": str(search_id), "status": "running"}
+
+@router.post("/{id}/cancel")
+async def cancel_search(id: str, current_user: dict = Depends(get_current_user_profile)):
+    db = get_db()
+    username = current_user["username"]
+    is_admin = current_user.get("role") == "admin"
+    try:
+        obj_id = ObjectId(id)
+    except:
+        raise HTTPException(status_code=400, detail="Invalid search ID")
+
+    search = await db.searches.find_one({"_id": obj_id})
+    if not search:
+        raise HTTPException(status_code=404, detail="Search not found")
+    if not is_admin and search.get("created_by") != username:
+        raise HTTPException(status_code=404, detail="Search not found")
+
+    if search["status"] != "running":
+        return {"id": id, "status": search["status"], "cancel_requested": False}
+
+    # Cooperative cancellation: run_region_search checks this flag between
+    # each (location, keyword) pair and stops cleanly, keeping everything
+    # already found. There's no hard kill here — a search that's mid-way
+    # through crawling one business will finish that business first, which
+    # is intentional (avoids losing a half-written record).
+    await db.searches.update_one({"_id": obj_id}, {"$set": {"cancel_requested": True}})
+    return {"id": id, "status": "running", "cancel_requested": True}
+
 
 @router.get("/{id}")
 async def get_search(id: str, current_user: dict = Depends(get_current_user_profile)):
@@ -64,13 +98,13 @@ async def get_search(id: str, current_user: dict = Depends(get_current_user_prof
         obj_id = ObjectId(id)
     except:
         raise HTTPException(status_code=400, detail="Invalid search ID")
-        
+
     search = await db.searches.find_one({"_id": obj_id})
     if not search:
         raise HTTPException(status_code=404, detail="Search not found")
     if not is_admin and search.get("created_by") != username:
         raise HTTPException(status_code=404, detail="Search not found")
-        
+
     response = {
         "id": str(search["_id"]),
         "status": search["status"],
@@ -78,6 +112,7 @@ async def get_search(id: str, current_user: dict = Depends(get_current_user_prof
         "keywords_total": search["keywords_total"],
         "total_results": search.get("total_results", 0),
         "place_details_calls_used": search.get("place_details_calls_used", 0),
+        "cancel_requested": search.get("cancel_requested", False),
         "quota_status": "OK" # Ideally this would fetch from quota tracker, but UI pulls banner separately
     }
     
@@ -134,7 +169,14 @@ async def list_searches(
     }
 
 @router.get("/{id}/export")
-async def download_export(id: str, format: str = "xlsx", selected_columns: List[str] | None = None, current_user: dict = Depends(get_current_user_profile)):
+async def download_export(
+    id: str,
+    format: str = "xlsx",
+    selected_columns: List[str] | None = Query(None),
+    selected_tiers: List[str] | None = Query(None),
+    selected_roles: List[str] | None = Query(None),
+    current_user: dict = Depends(get_current_user_profile),
+):
     username = current_user["username"]
     is_admin = current_user.get("role") == "admin"
     db = get_db()
@@ -151,7 +193,7 @@ async def download_export(id: str, format: str = "xlsx", selected_columns: List[
     if format not in ["xlsx", "csv"]:
         raise HTTPException(status_code=400, detail="Format must be xlsx or csv")
 
-    stored_filename = await export_search(id, format, selected_columns=selected_columns)
+    stored_filename = await export_search(id, format, selected_columns=selected_columns, selected_tiers=selected_tiers, selected_roles=selected_roles)
     if not stored_filename:
         raise HTTPException(status_code=404, detail="Export failed or not found")
 

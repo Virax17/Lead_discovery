@@ -1,329 +1,249 @@
 # LeadDiscovery
 
-LeadDiscovery is a FastAPI + React application for discovering business leads by country, storing them in a deduplicated master database, tracking user credits, and exporting results for follow-up.
+LeadDiscovery is a FastAPI + React application for finding potential Tritorc cold-mail leads from Google Places, crawling their websites, scoring their fit, and exporting qualified businesses.
 
-The intended deployment is:
+The current goal is not generic industrial company discovery. The app should find businesses that are likely to buy or use Tritorc products/services, while excluding competitors, suppliers, distributors, and unrelated local businesses.
 
-- Backend: Render native Python web service
-- Frontend: Vercel Vite static app
-- Database: MongoDB Atlas or local MongoDB
-- External API: Google Places API
+## Current lead-quality logic
 
-Docker is not required for local testing or production deployment.
-
-## Features
-
-- Country and region business searches powered by Google Places.
-- Automatic deduplication into the master database by country.
-- Search history with completed, failed, and rate-limited states.
-- User login, JWT auth, credit limits, and admin portal at `/admin`.
-- Admin tools for users, passwords, credits, active status, and country cleanup.
-- Excel and CSV exports with a `Source` column set to `LeadDiscovery`.
-- Optional S3 export storage for production.
-
-## Project Structure
+The active crawler/scorer version is:
 
 ```text
-lead-discovery/
+CRAWL_VERSION = tritorc-crawl-v3
+SCORING_VERSION = role-concept-score-v1
+```
+
+The pipeline is:
+
+```text
+Google Places candidates
+-> website crawl with Crawlee
+-> language detection
+-> multilingual concept matching
+-> business-role classification
+-> final tier: best / strong / weak / reject / unknown
+-> UI filters and export
+```
+
+## What counts as a good Tritorc lead
+
+Good leads are businesses that likely need controlled bolting, onsite machining, pipeline/process integrity, hot tapping, hydrotesting, leak sealing, heat-exchanger work, shutdown/turnaround support, or industrial maintenance.
+
+Preferred roles:
+
+- `end_user_operator`
+- `industrial_service_contractor`
+- `epc_contractor`
+
+Examples:
+
+- refinery / petrochemical / chemical / fertilizer plant operators
+- pipeline operators
+- shutdown or turnaround maintenance contractors
+- oil & gas field-service contractors
+- hot tapping / hydrotesting / pipeline integrity service companies
+- industrial EPC contractors
+- power, steel, wind, and heavy-industry maintenance targets
+
+## What should be excluded
+
+The app now classifies and rejects:
+
+- `supplier_distributor`
+- `competitor_manufacturer`
+- `generic_local_service`
+
+Examples to exclude:
+
+- hydraulic torque wrench sellers
+- bolt tensioner sellers
+- flange-facing / pipe-cutting machine sellers
+- industrial tool rental/sales companies
+- authorized distributors of competing tool brands
+- valve, fitting, hose, fastener, hardware, and machine-tool sellers
+- generic building maintenance, HVAC, residential construction, renovation, restaurants, schools, real estate, etc.
+
+Important distinction:
+
+```text
+Service contractor using tools = possible lead
+Company selling/renting competing tools = reject
+End-user plant/operator = good lead
+```
+
+## Main features
+
+- Google Places search by country/state/city.
+- Buyer-focused default keywords.
+- Crawlee-based website crawling.
+- Multilingual concept scoring for English, Spanish, French, Portuguese, and German.
+- Business-role scoring to reject suppliers/competitors.
+- Tier filters: Best, Strong, Weak, Reject, Unknown.
+- Role filters: End-user, Service Contractor, EPC, Supplier/Distributor, Competitor, Generic Service, Unknown.
+- Master database with deduplication by Google `place_id`.
+- CSV/XLSX exports with crawler evidence, role reason, query source, language, and score.
+- User login, JWT auth, credit limits, and admin portal.
+- Google Places API quota tracking.
+- Optional LLM fallback fields are implemented but disabled by default.
+
+## Important implementation docs
+
+- [Current implementation status](C:/Users/VP89/Desktop/Lead_discovery/IMPLEMENTATION_STATUS.md)
+- [Supplier/role scoring fix plan](C:/Users/VP89/Desktop/Lead_discovery/SUPPLIER_ROLE_SCORING_FIX_PLAN.md)
+- [Multilingual crawler plan](C:/Users/VP89/Desktop/Lead_discovery/MULTILINGUAL_CRAWLER_PLAN.md)
+- [Deployment guide](C:/Users/VP89/Desktop/Lead_discovery/DEPLOYMENT.md)
+
+## Project structure
+
+```text
+Lead_discovery/
 |-- backend/
-|   |-- app/                 # FastAPI app
-|   |-- scripts/             # maintenance scripts
-|   |-- .env.example         # backend env template
+|   |-- app/
+|   |   |-- api/
+|   |   |-- config/
+|   |   |-- db/
+|   |   |-- models/
+|   |   `-- services/
+|   |-- scripts/
 |   |-- requirements.txt
-|   |-- runtime.txt          # Render Python version
-|   |-- run_backend.ps1      # Windows local launcher
+|   |-- run_backend.ps1
 |   `-- run_backend.bat
 |-- frontend/
-|   |-- src/                 # React app
-|   |-- .env.example         # Vercel/local frontend env template
+|   |-- src/
 |   |-- package.json
-|   `-- vercel.json          # SPA route fallback
-|-- render.yaml              # Render native Python service blueprint
+|   `-- vite.config.js
+|-- data/audit/
+|-- DEPLOYMENT.md
+|-- IMPLEMENTATION_STATUS.md
+|-- MULTILINGUAL_CRAWLER_PLAN.md
+|-- SUPPLIER_ROLE_SCORING_FIX_PLAN.md
 `-- README.md
 ```
 
-## Local Setup Without Docker
+## Local setup
 
-Open PowerShell.
+### Backend
 
-### 1. Clone and enter the project
-
-```powershell
-cd D:\tritorc\lead_dcy
-git clone <your-git-repo-url> lead-discovery
-cd lead-discovery
-```
-
-If the repo already exists:
+From PowerShell:
 
 ```powershell
-cd D:\tritorc\lead_dcy\lead-discovery
-```
-
-### 2. Create backend env file
-
-```powershell
-Copy-Item backend\.env.example backend\.env
-notepad backend\.env
-```
-
-Set these values:
-
-```env
-GOOGLE_PLACES_API_KEY=your-google-places-api-key
-MONGO_URI=mongodb://localhost:27017
-MONGO_DB_NAME=lead_discovery
-APP_SECRET_KEY=replace-with-a-long-random-secret
-
-BOOTSTRAP_ADMIN_USERNAME=your-admin-email@example.com
-BOOTSTRAP_ADMIN_PASSWORD=choose-a-strong-admin-password
-BOOTSTRAP_ADMIN_CREDIT_LIMIT=1000
-
-BOOTSTRAP_USER_USERNAME=test
-BOOTSTRAP_USER_PASSWORD=choose-a-test-user-password
-BOOTSTRAP_USER_CREDIT_LIMIT=1000
-
-CORS_ALLOWED_ORIGINS=
-```
-
-Keep `backend\.env` private. Do not commit it.
-
-### 3. Start MongoDB
-
-Use either local MongoDB:
-
-```powershell
-mongod
-```
-
-Or set `MONGO_URI` in `backend\.env` to your MongoDB Atlas connection string.
-
-### 4. Install and start the backend
-
-```powershell
-cd D:\tritorc\lead_dcy\lead-discovery\backend
-python -m venv venv
-.\venv\Scripts\python.exe -m pip install --upgrade pip
+cd C:\Users\VP89\Desktop\Lead_discovery\backend
 .\venv\Scripts\python.exe -m pip install -r requirements.txt
 .\venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-Or from the project root:
-
-```powershell
-cd D:\tritorc\lead_dcy\lead-discovery
-.\backend\run_backend.ps1
-```
+If you use port `8001`, make sure the frontend `VITE_API_BASE` or Vite proxy also points to `8001`.
 
 Backend URLs:
 
-- Health: `http://127.0.0.1:8000/health`
-- API docs: `http://127.0.0.1:8000/docs`
-- API base: `http://127.0.0.1:8000/api`
+```text
+http://127.0.0.1:8000/docs
+http://127.0.0.1:8000/api
+```
 
-### 5. Install and start the frontend
+### Frontend
 
-Open a second PowerShell terminal:
+Open a second PowerShell:
 
 ```powershell
-cd D:\tritorc\lead_dcy\lead-discovery\frontend
+cd C:\Users\VP89\Desktop\Lead_discovery\frontend
 npm install
 npm run dev
 ```
 
-Open:
+Open the Vite URL shown in the terminal, usually:
 
 ```text
-http://localhost:5173
+http://127.0.0.1:5173/
 ```
 
-Local frontend development automatically uses:
+If ports `5173` or `5174` are busy, Vite will automatically choose another port.
 
-```text
-http://localhost:8000/api
-```
+## Environment variables
 
-### 6. Log in as admin
-
-Use the values from:
+Backend `.env`:
 
 ```env
-BOOTSTRAP_ADMIN_USERNAME
-BOOTSTRAP_ADMIN_PASSWORD
-```
-
-Then open:
-
-```text
-http://localhost:5173/admin
-```
-
-Only users with role `admin` can see the admin portal.
-
-## Deploy Backend To Render
-
-This project is ready for Render without Docker.
-
-### Option A: Use `render.yaml`
-
-1. Push the repo to GitHub, GitLab, or Bitbucket.
-2. In Render, choose **New +** -> **Blueprint**.
-3. Connect the repo.
-4. Render reads `render.yaml` and creates the backend service from `backend/`.
-5. Add the secret environment variables listed below.
-
-### Option B: Create a Web Service manually
-
-Use these Render settings:
-
-```text
-Runtime: Python
-Root Directory: backend
-Build Command: pip install -r requirements.txt
-Start Command: uvicorn app.main:app --host 0.0.0.0 --port $PORT
-Health Check Path: /health
-```
-
-Render environment variables:
-
-```env
-PYTHON_VERSION=3.12.8
 GOOGLE_PLACES_API_KEY=your-google-places-api-key
-MONGO_URI=your-mongodb-atlas-uri
+MONGO_URI=your-mongodb-atlas-uri-or-local-mongodb-uri
 MONGO_DB_NAME=lead_discovery
-APP_SECRET_KEY=generate-a-long-random-secret
+APP_SECRET_KEY=replace-with-a-long-random-secret
 
-BOOTSTRAP_ADMIN_USERNAME=your-admin-email@example.com
-BOOTSTRAP_ADMIN_PASSWORD=choose-a-strong-admin-password
+BOOTSTRAP_ADMIN_USERNAME=admin@example.com
+BOOTSTRAP_ADMIN_PASSWORD=choose-a-strong-password
 BOOTSTRAP_ADMIN_CREDIT_LIMIT=1000
 
-BOOTSTRAP_USER_USERNAME=test
-BOOTSTRAP_USER_PASSWORD=choose-a-test-user-password
+BOOTSTRAP_USER_USERNAME=test@example.com
+BOOTSTRAP_USER_PASSWORD=choose-a-test-password
 BOOTSTRAP_USER_CREDIT_LIMIT=1000
 
-CORS_ALLOWED_ORIGINS=https://your-vercel-app.vercel.app
+CORS_ALLOWED_ORIGINS=
+
+GEMINI_API_KEY=your-google-ai-studio-gemini-api-key
+
+LLM_FALLBACK_ENABLED=false
+LLM_FALLBACK_MIN_SCORE=40
+LLM_FALLBACK_MAX_SCORE=69
+LLM_FALLBACK_MAX_CALLS_PER_SEARCH=50
+LLM_FALLBACK_MAX_CALLS_PER_MONTH=1000
 ```
 
-After deploy, test:
+Keep real `.env` files private.
 
-```text
-https://your-render-service.onrender.com/health
-```
+## Useful validation commands
 
-## Deploy Frontend To Vercel
-
-1. Push the same repo to GitHub, GitLab, or Bitbucket.
-2. In Vercel, import the repo.
-3. Set the project root directory to:
-
-```text
-frontend
-```
-
-4. Use the Vite defaults:
-
-```text
-Build Command: npm run build
-Output Directory: dist
-```
-
-5. Add this Vercel environment variable:
-
-```env
-VITE_API_BASE=https://your-render-service.onrender.com/api
-```
-
-6. Deploy.
-
-After Vercel gives you the frontend URL, go back to Render and set:
-
-```env
-CORS_ALLOWED_ORIGINS=https://your-vercel-app.vercel.app
-```
-
-Redeploy the Render backend after changing CORS.
-
-## Production Notes
-
-- Use MongoDB Atlas for Render. Localhost MongoDB will not work from Render.
-- In MongoDB Atlas Network Access, allow Render to connect to the database.
-- Keep `GOOGLE_PLACES_API_KEY`, `MONGO_URI`, `APP_SECRET_KEY`, and passwords out of Git.
-- Render free services can sleep after inactivity, so the first request may be slow.
-- Render's filesystem is ephemeral. For persistent export files, set `S3_BUCKET`, `S3_REGION`, and optionally `S3_PREFIX`.
-- Vercel frontend environment variables are baked into the build, so redeploy Vercel after changing `VITE_API_BASE`.
-
-## Useful Commands
-
-Run backend checks:
+Backend:
 
 ```powershell
-cd D:\tritorc\lead_dcy\lead-discovery\backend
+cd C:\Users\VP89\Desktop\Lead_discovery\backend
 .\venv\Scripts\python.exe -m compileall -q app scripts
 .\venv\Scripts\python.exe -c "import app.main; print('backend import ok')"
 ```
 
-Run frontend production build:
+Frontend:
 
 ```powershell
-cd D:\tritorc\lead_dcy\lead-discovery\frontend
+cd C:\Users\VP89\Desktop\Lead_discovery\frontend
 npm run build
 ```
 
-Check Git status before pushing:
+Argentina audit:
 
 ```powershell
-cd D:\tritorc\lead_dcy\lead-discovery
-git status --short
+cd C:\Users\VP89\Desktop\Lead_discovery\backend
+.\venv\Scripts\python.exe scripts\audit_crawl_snapshot.py --country Argentina --limit 52 --max-pages 2 --output ../data/audit/crawl_audit_argentina_aug3_role_v2.json
 ```
 
-Commit and push:
+## Latest Argentina audit result
 
-```powershell
-git add .
-git commit -m "Prepare Render and Vercel deployment"
-git push
-```
-
-## Troubleshooting
-
-### `.\backend\run_backend.ps1` says the path is missing
-
-Run it from the project root:
-
-```powershell
-cd D:\tritorc\lead_dcy\lead-discovery
-.\backend\run_backend.ps1
-```
-
-If you are already inside `backend`, use:
-
-```powershell
-.\run_backend.ps1
-```
-
-### Admin portal is missing
-
-Log in with the bootstrap admin account. Normal users do not see `/admin`.
-
-### Frontend says it cannot sign in
-
-Check the backend health endpoint first:
+Using the Aug 3 Argentina dataset with the role-aware crawler:
 
 ```text
-http://127.0.0.1:8000/health
+Strong: 1
+Weak: 1
+Reject: 37
+Unknown: 12
 ```
 
-For Vercel, confirm `VITE_API_BASE` ends with `/api` and points to the Render backend.
+Key expected behavior:
 
-### Searches run forever
+- `Swagelok Argentina` is rejected as `supplier_distributor`.
+- `BINNING OIL TOOLS` is rejected as `supplier_distributor`.
+- `Morken Group` remains `strong`.
+- `Quintana WellPro` remains `weak`.
 
-Open History. The backend cleans stale running searches when history is fetched. If the issue repeats, check the Render logs or local backend terminal for Google Places errors, rate limits, or MongoDB connection errors.
+Report:
 
-### Searches return very few businesses
+[crawl_audit_argentina_aug3_role_v2.json](C:/Users/VP89/Desktop/Lead_discovery/data/audit/crawl_audit_argentina_aug3_role_v2.json)
 
-Confirm the Google Places API key is valid, billing is enabled, and the selected country is supported by the configured search keywords.
+## Team workflow rule
 
-## Deployment References
+Before future coding or new project work:
 
-- Render web services require apps to bind to `0.0.0.0` and use the provided port.
-- Vercel Vite apps read build-time frontend variables with the `VITE_` prefix.
+1. Create or update a research/implementation `.md` plan first.
+2. Use higher-model reasoning for planning when available.
+3. Wait for approval.
+4. Then implement, validate, and update docs.
+
+This rule exists because crawler/search quality changes can easily create false positives or burn API quota.
+

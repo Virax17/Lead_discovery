@@ -4,6 +4,8 @@ from app.api.auth import get_current_admin
 from app.db.connection import get_db
 from app.models.schemas import UserCreate, UserActiveUpdate, UserPasswordUpdate
 from app.services.country_maintenance import normalize_all_countries
+from app.services.quota_tracker import get_admin_usage_stats
+from app.services.llm_tracker import get_llm_usage_summary
 from app.services.users import (
     create_user,
     get_user_by_username,
@@ -27,6 +29,16 @@ async def normalize_countries(current_user: dict = Depends(get_current_admin)):
 @router.get("/users")
 async def list_admin_users(current_user: dict = Depends(get_current_admin)):
     return await list_users_with_usage()
+
+
+@router.get("/usage-stats")
+async def usage_stats(current_user: dict = Depends(get_current_admin)):
+    return await get_admin_usage_stats()
+
+
+@router.get("/llm-usage-stats")
+async def llm_usage_stats(current_user: dict = Depends(get_current_admin)):
+    return await get_llm_usage_summary()
 
 
 @router.post("/users", status_code=status.HTTP_201_CREATED)

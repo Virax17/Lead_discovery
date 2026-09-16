@@ -1,32 +1,47 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ChevronRight, Plus, X, Sparkles, ShieldAlert } from 'lucide-react';
-import { createSearch } from '../api';
+import { createSearch, fetchCities, fetchStates } from '../api';
 import { useI18n } from '../i18n/I18nContext';
 import { useShell } from '../context/ShellContext';
+import Combobox from './Combobox';
+import LocationPicker from './LocationPicker';
+
+// Matches MAX_FANOUT_LOCATIONS in backend/app/services/search_runner.py.
+const MAX_FANOUT_LOCATIONS = 25;
 
 const DEFAULT_KEYWORDS = [
-    'Shutdown contractor',
-    'Maintenance contractor',
-    'Controlled bolting',
-    'Hydraulic torque wrench supplier',
-    'Hydraulic bolt tensioner supplier',
-    'Flange management',
-    'Pipe cold cutting and beveling',
-    'Flange facing machine',
-    'Tube expander',
-    'Onsite machining',
-    'Hot tapping service',
-    'Pipeline integrity contractor'
+    'Industrial shutdown contractor',
+    'Turnaround maintenance contractor',
+    'Refinery maintenance contractor',
+    'Petrochemical plant maintenance',
+    'Fertilizer plant maintenance contractor',
+    'Grain elevator maintenance contractor',
+    'Pipeline maintenance contractor',
+    'Pipeline integrity contractor',
+    'Hot tapping contractor',
+    'Onsite machining contractor',
+    'Flange bolting contractor',
+    'Heat exchanger retubing contractor',
+    'Power plant maintenance contractor',
+    'Steel plant maintenance contractor',
+    'Wind turbine maintenance contractor',
+    'Oil and gas EPC contractor',
+    'Structural steel erection contractor',
+    'Bridge construction contractor'
 ];
 
 const DEFAULT_INDUSTRIES = [
     'Oil and gas',
+    'Petrochemical',
     'Wind energy',
     'Power',
+    'Fertilizer',
+    'Agriculture',
+    'Steel',
     'Heavy engineering',
-    'Turbine manufacturing',
-    'Construction'
+    'Heavy civil/Infrastructure',
+    'Industrial EPC'
 ];
 
 function TagEditor({ label, items, setItems, placeholder, addLabel }) {
@@ -85,9 +100,16 @@ export default function Dashboard() {
     const { t, formatNumber, formatCurrency } = useI18n();
     const { quota, quotaLoading, countries, countriesLoading } = useShell();
     const [step, setStep] = useState('setup');
-    const [country, setCountry] = useState('India');
-    const [state, setState] = useState('');
-    const [city, setCity] = useState('');
+    const [country, setCountry] = useState({ name: 'India', code: null });
+    const [stateSel, setStateSel] = useState(null);
+    const [citySel, setCitySel] = useState(null);
+    const [useCustomArea, setUseCustomArea] = useState(false);
+    const [customCenter, setCustomCenter] = useState(null);
+    const [customRadiusKm, setCustomRadiusKm] = useState(25);
+    const [states, setStates] = useState([]);
+    const [statesLoading, setStatesLoading] = useState(false);
+    const [cities, setCities] = useState([]);
+    const [citiesLoading, setCitiesLoading] = useState(false);
     const [maxResults, setMaxResults] = useState(100);
     const [websiteOnly, setWebsiteOnly] = useState(false);
     const [keywords, setKeywords] = useState(DEFAULT_KEYWORDS);
@@ -95,25 +117,84 @@ export default function Dashboard() {
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
 
-    const countryCode = useMemo(() => {
-        const match = countries.find(c => c.name.toLowerCase() === country.trim().toLowerCase());
-        return match ? match.code : null;
-    }, [countries, country]);
+    // Backfill the ISO code for the hardcoded default country once the list loads.
+    useEffect(() => {
+        if (!country.code && countries.length) {
+            const match = countries.find(c => c.name.toLowerCase() === country.name.toLowerCase());
+            if (match) setCountry(match);
+        }
+    }, [countries, country.code, country.name]);
+
+    // Country changed: reload its states, reset state/city selection.
+    useEffect(() => {
+        let cancelled = false;
+        setStateSel(null);
+        setCitySel(null);
+        setCities([]);
+        if (!country.code) {
+            setStates([]);
+            return undefined;
+        }
+        setStatesLoading(true);
+        fetchStates(country.code)
+            .then(data => { if (!cancelled) setStates(data); })
+            .catch(() => { if (!cancelled) setStates([]); })
+            .finally(() => { if (!cancelled) setStatesLoading(false); });
+        return () => { cancelled = true; };
+    }, [country.code]);
+
+    // State changed: reload its cities, reset city selection.
+    useEffect(() => {
+        let cancelled = false;
+        setCitySel(null);
+        if (!country.code || !stateSel?.code) {
+            setCities([]);
+            return undefined;
+        }
+        setCitiesLoading(true);
+        fetchCities(country.code, stateSel.code)
+            .then(data => { if (!cancelled) setCities(data); })
+            .catch(() => { if (!cancelled) setCities([]); })
+            .finally(() => { if (!cancelled) setCitiesLoading(false); });
+        return () => { cancelled = true; };
+    }, [country.code, stateSel]);
+
+    const countryCode = country.code;
+    const allStatesOption = useMemo(() => ({ name: t('common.anyState'), code: '__all__' }), [t]);
+    const allCitiesOption = useMemo(() => ({ name: t('common.anyCity'), code: '__all__' }), [t]);
 
     const quotaPlan = quota?.active_plan === 'paid_overage' ? t('app.paidOverage') : t('app.free');
     const quotaUsed = quota?.calls_used ?? 0;
     const quotaLimit = quota?.quota_block_threshold ?? 1000;
     const quotaOverage = quota?.overage_cost_estimate ?? 0;
-    const estimatedCalls = useMemo(() => keywords.length * Number(maxResults || 0), [keywords.length, maxResults]);
+    // No state/city selected -> the backend auto-fans the search across a
+    // bounded set of the country's states, each searched with a real
+    // locationBias circle (see run_region_search's fan-out). Capped at
+    // MAX_FANOUT_LOCATIONS (matches the backend's own cap) rather than raw
+    // state count, since state count varies arbitrarily by country and has
+    // nothing to do with how large or business-dense it actually is — the
+    // cap keeps cost bounded and predictable the same way for every country.
+    // A custom-drawn circle is a deliberate, exact request -- always exactly
+    // one location, never the country-level fan-out.
+    const isFanningOut = !useCustomArea && !stateSel?.name && !citySel?.name;
+    const locationCount = isFanningOut ? Math.min(Math.max(states.length, 1), MAX_FANOUT_LOCATIONS) : 1;
+    const pagesPerLocation = Math.max(1, Math.ceil(Number(maxResults || 1) / 20));
+    const estimatedCalls = useMemo(
+        () => keywords.length * locationCount * pagesPerLocation,
+        [keywords.length, locationCount, pagesPerLocation]
+    );
     const projectedUsage = (quota?.calls_used ?? 0) + estimatedCalls;
     const projectedOverage = quota ? Math.max(0, projectedUsage - quotaLimit) : 0;
     const searchWouldBlock = quota ? !quota.allow_paid_overage && projectedUsage > quotaLimit : false;
 
     const payload = {
-        country,
+        country: country.name,
         country_code: countryCode,
-        state: state || null,
-        city: city || null,
+        state: useCustomArea ? null : (stateSel?.name || null),
+        city: useCustomArea ? null : (citySel?.name || null),
+        center_lat: useCustomArea ? customCenter?.lat ?? null : null,
+        center_lng: useCustomArea ? customCenter?.lng ?? null : null,
+        radius_km: useCustomArea ? customRadiusKm : null,
         max_results: Number(maxResults),
         keywords,
         industries,
@@ -130,6 +211,10 @@ export default function Dashboard() {
         }
         if (industries.length === 0) {
             setError(t('dashboard.addAtLeastOneIndustry'));
+            return;
+        }
+        if (useCustomArea && !customCenter) {
+            setError(t('dashboard.customAreaNeedsCenter'));
             return;
         }
 
@@ -162,6 +247,14 @@ export default function Dashboard() {
                             <p className="mt-3 max-w-2xl text-sm text-slate-100/90">
                                 {t('dashboard.setupSubtitle')}
                             </p>
+                            <div className="mt-5 flex flex-wrap items-center gap-2 text-xs font-medium text-white/90">
+                                {[t('dashboard.heroStep1'), t('dashboard.heroStep2'), t('dashboard.heroStep3')].map((step, index) => (
+                                    <span key={step} className="inline-flex items-center gap-2 rounded-full border border-white/20 bg-white/10 px-3 py-1.5">
+                                        <span className="flex h-4 w-4 items-center justify-center rounded-full bg-white/20 text-[10px] font-semibold">{index + 1}</span>
+                                        {step}
+                                    </span>
+                                ))}
+                            </div>
                         </div>
                         <div className="rounded-3xl border border-white/20 bg-white/10 p-5 backdrop-blur">
                             <p className="text-xs uppercase tracking-[0.2em] text-white/70">{t('dashboard.quotaSnapshot')}</p>
@@ -199,32 +292,76 @@ export default function Dashboard() {
 
                         {step === 'setup' ? (
                             <form onSubmit={reviewSearch} className="space-y-6">
-                                <div className="grid gap-4 sm:grid-cols-2">
-                                    <div>
-                                        <label className="block text-sm font-medium text-slate-700">{t('dashboard.country')}</label>
-                                        <input
-                                            required
-                                            type="text"
-                                            list="country-options"
-                                            value={country}
-                                            onChange={e => setCountry(e.target.value)}
-                                            className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:bg-white"
-                                        />
-                                        <datalist id="country-options">
-                                            {countriesLoading ? null : countries.map(c => (
-                                                <option key={c.code} value={c.name} />
-                                            ))}
-                                        </datalist>
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium text-slate-700">{t('dashboard.stateRegion')}</label>
-                                        <input type="text" value={state} onChange={e => setState(e.target.value)} className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:bg-white" />
-                                    </div>
-                                    <div>
-                                        <label className="block text-sm font-medium text-slate-700">{t('dashboard.city')}</label>
-                                        <input type="text" value={city} onChange={e => setCity(e.target.value)} className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm outline-none transition focus:border-blue-500 focus:bg-white" />
-                                    </div>
+                                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                                    <Combobox
+                                        label={t('dashboard.country')}
+                                        value={country}
+                                        onChange={item => item && setCountry(item)}
+                                        items={countries}
+                                        getKey={c => c.code}
+                                        loading={countriesLoading}
+                                        placeholder={t('dashboard.searchCountry')}
+                                    />
+                                    {!useCustomArea && (
+                                        <>
+                                            <Combobox
+                                                label={t('dashboard.stateRegion')}
+                                                value={stateSel || allStatesOption}
+                                                onChange={item => setStateSel(!item || item.code === '__all__' ? null : item)}
+                                                items={[allStatesOption, ...states]}
+                                                getKey={s => s.code}
+                                                loading={statesLoading}
+                                                disabled={!country.code}
+                                                placeholder={t('dashboard.searchState')}
+                                            />
+                                            <Combobox
+                                                label={t('dashboard.city')}
+                                                value={citySel || allCitiesOption}
+                                                onChange={item => setCitySel(!item || item.code === '__all__' ? null : item)}
+                                                items={[allCitiesOption, ...cities]}
+                                                getKey={c => c.code ?? c.name}
+                                                loading={citiesLoading}
+                                                disabled={!stateSel}
+                                                placeholder={stateSel ? t('dashboard.searchCity') : t('dashboard.selectStateFirst')}
+                                            />
+                                        </>
+                                    )}
                                 </div>
+
+                                <div className="flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3">
+                                    <div>
+                                        <p className="text-sm font-medium text-slate-700">{t('dashboard.customAreaLabel')}</p>
+                                        <p className="text-xs text-slate-500">{t('dashboard.customAreaHint')}</p>
+                                    </div>
+                                    <label className="relative inline-flex cursor-pointer items-center">
+                                        <input
+                                            type="checkbox"
+                                            checked={useCustomArea}
+                                            onChange={e => {
+                                                setUseCustomArea(e.target.checked);
+                                                if (e.target.checked) {
+                                                    setStateSel(null);
+                                                    setCitySel(null);
+                                                } else {
+                                                    setCustomCenter(null);
+                                                }
+                                            }}
+                                            className="peer sr-only"
+                                        />
+                                        <div className="h-6 w-11 rounded-full bg-slate-300 transition peer-checked:bg-blue-600 after:absolute after:left-[2px] after:top-[2px] after:h-5 after:w-5 after:rounded-full after:bg-white after:transition-all after:content-[''] peer-checked:after:translate-x-5" />
+                                    </label>
+                                </div>
+
+                                {useCustomArea && (
+                                    <LocationPicker
+                                        center={customCenter}
+                                        radiusKm={customRadiusKm}
+                                        onChange={({ lat, lng, radiusKm }) => {
+                                            setCustomCenter({ lat, lng });
+                                            setCustomRadiusKm(radiusKm);
+                                        }}
+                                    />
+                                )}
 
                                 <div className="grid gap-4 sm:grid-cols-2">
                                     <div>
@@ -293,8 +430,13 @@ export default function Dashboard() {
                                 </div>
 
                                 <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                                    <SummaryCard label={t('dashboard.region')} value={country} />
-                                    <SummaryCard label={t('dashboard.scope')} value={`${state || t('common.anyState')} · ${city || t('common.anyCity')}`} />
+                                    <SummaryCard label={t('dashboard.region')} value={country.name} />
+                                    <SummaryCard
+                                        label={t('dashboard.scope')}
+                                        value={useCustomArea && customCenter
+                                            ? `${t('dashboard.customAreaLabel')} · ${customRadiusKm}km radius`
+                                            : `${stateSel?.name || t('common.anyState')} · ${citySel?.name || t('common.anyCity')}`}
+                                    />
                                     <SummaryCard label={t('dashboard.websiteFilter')} value={websiteOnly ? t('dashboard.enabled') : t('dashboard.disabled')} />
                                     <SummaryCard label={t('dashboard.keywords')} value={t('dashboard.selected', { count: formatNumber(keywords.length) })} />
                                     <SummaryCard label={t('dashboard.industryTypes')} value={t('dashboard.selected', { count: formatNumber(industries.length) })} />
@@ -306,8 +448,24 @@ export default function Dashboard() {
                                         <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">{t('dashboard.quotaImpact')}</p>
                                         <p className="mt-2 text-lg font-semibold text-slate-900">{t('dashboard.estimatedCallsLabel', { count: formatNumber(estimatedCalls) })}</p>
                                         <p className="mt-1 text-sm text-slate-600">
-                                            {t('dashboard.estimatedCalls')} = {formatNumber(keywords.length)} x {formatNumber(maxResults)}.
+                                            {isFanningOut
+                                                ? `${t('dashboard.estimatedCalls')} = ${formatNumber(keywords.length)} keywords x ${formatNumber(locationCount)} locations in ${country.name} x ${formatNumber(pagesPerLocation)} page(s).`
+                                                : `${t('dashboard.estimatedCalls')} = ${formatNumber(keywords.length)} keywords x ${formatNumber(pagesPerLocation)} page(s).`}
                                         </p>
+                                        {useCustomArea && (
+                                            <p className="mt-1 text-sm text-amber-700">
+                                                Searching a single {formatNumber(customRadiusKm)}km-radius circle you drew on the map — this is an exact, deterministic count, not an estimate: it will always be exactly {formatNumber(keywords.length)} keywords x {formatNumber(pagesPerLocation)} page(s), with no fan-out or drill-down.
+                                            </p>
+                                        )}
+                                        {isFanningOut && (
+                                            <p className="mt-1 text-sm text-amber-700">
+                                                No state or city selected — this will automatically search a real 50km-radius area around up to {formatNumber(locationCount)} location{locationCount === 1 ? '' : 's'} in {country.name}
+                                                {states.length > MAX_FANOUT_LOCATIONS
+                                                    ? ` (capped at ${formatNumber(MAX_FANOUT_LOCATIONS)}, the busiest of its ${formatNumber(states.length)} states/regions)`
+                                                    : ''}
+                                                . The actual number searched is often lower — nearby locations that would overlap are automatically merged into one. This is a typical estimate: any location+keyword combo already searched recently costs nothing to repeat, but dense states/regions may automatically drill down into a few of their cities for deeper coverage when the state-level search alone doesn't capture everything, so actual calls can run higher than this estimate in those cases.
+                                            </p>
+                                        )}
                                         <p className="mt-2 text-sm text-slate-600">
                                             Final businesses can be lower after duplicate removal, website-only filtering, and country matching.
                                         </p>

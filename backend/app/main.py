@@ -45,7 +45,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-from app.api import auth, searches, quota, settings, countries, businesses, admin
+from app.api import auth, searches, quota, settings, countries, businesses, admin, geo
 
 # Setup CORS
 configured_origins = [origin.strip() for origin in app_settings.cors_allowed_origins.split(",") if origin.strip()]
@@ -77,6 +77,7 @@ app.include_router(settings.router, prefix="/api")
 app.include_router(countries.router, prefix="/api")
 app.include_router(businesses.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
+app.include_router(geo.router, prefix="/api")
 
 @app.get("/")
 async def root():
@@ -99,6 +100,8 @@ async def api_root():
             "/api/quota/status",
             "/api/settings",
             "/api/countries",
+            "/api/geo/states",
+            "/api/geo/cities",
             "/api/businesses",
             "/api/admin/users",
         ],

@@ -23,6 +23,20 @@ class Settings(BaseSettings):
     s3_region: str = ""
     s3_prefix: str = "exports/"
 
+    # LLM relevance scoring for the website scanner. Leave unset to skip the
+    # LLM step entirely (keyword-only matching).
+    gemini_api_key: str = ""
+
+    # Testing-only hard cap on real Google Places API calls (text search +
+    # place details combined), independent of the real monthly quota. 0 (or
+    # unset) disables it. Counted in-memory, so it resets on backend restart.
+    test_max_places_calls: int = 0
+    llm_fallback_enabled: bool = False
+    llm_fallback_min_score: int = 40
+    llm_fallback_max_score: int = 69
+    llm_fallback_max_calls_per_search: int = 50
+    llm_fallback_max_calls_per_month: int = 1000
+
     model_config = SettingsConfigDict(env_file=(".env", "backend/.env"), extra="ignore")
 
 settings = Settings()

@@ -9,10 +9,17 @@ STALE_RUNNING_SEARCH_MINUTES = 10
 async def mark_stale_running_searches(max_age_minutes: int = STALE_RUNNING_SEARCH_MINUTES) -> int:
     db = get_db()
     cutoff = datetime.utcnow() - timedelta(minutes=max_age_minutes)
+    # Staleness is judged by last-progress (updated_at), not raw creation
+    # time — a long-running multi-location fan-out search can legitimately
+    # run well past max_age_minutes while still actively progressing.
+    # Searches from before updated_at existed fall back to created_at.
     stale_searches = await db.searches.find(
         {
             "status": "running",
-            "created_at": {"$lt": cutoff},
+            "$or": [
+                {"updated_at": {"$lt": cutoff}},
+                {"updated_at": {"$exists": False}, "created_at": {"$lt": cutoff}},
+            ],
         },
         {"_id": 1},
     ).to_list(length=None)

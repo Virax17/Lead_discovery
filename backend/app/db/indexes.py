@@ -19,6 +19,13 @@ async def ensure_indexes():
 
     # master_businesses: index on country for fast country-wise browsing/export
     await db.master_businesses.create_index([("country", pymongo.ASCENDING)])
+    await db.master_businesses.create_index([("crawl_tier", pymongo.ASCENDING)])
+    await db.master_businesses.create_index([("crawl_version", pymongo.ASCENDING)])
+    await db.master_businesses.create_index([("source_query", pymongo.ASCENDING)])
+    await db.master_businesses.create_index([("detected_language", pymongo.ASCENDING)])
+    await db.master_businesses.create_index([("scoring_language", pymongo.ASCENDING)])
+    await db.master_businesses.create_index([("source_query_language", pymongo.ASCENDING)])
+    await db.master_businesses.create_index([("business_role", pymongo.ASCENDING)])
 
     # 2. search_results: compound unique index on (search_id, master_business_id)
     await db.search_results.create_index(
@@ -36,4 +43,10 @@ async def ensure_indexes():
     # Note: searches and api_usage_monthly use _id as their primary lookups.
     await db.searches.create_index([("created_by", pymongo.ASCENDING)])
     await db.searches.create_index([("created_at", pymongo.ASCENDING)])
+
+    # Note: industrial_anchors uses _id (version|country_code|state_code) as
+    # its primary lookup in get_fanout_anchors(); these support maintenance
+    # queries (e.g. clearing/inspecting a country's cache, staleness sweeps).
+    await db.industrial_anchors.create_index([("country_code", pymongo.ASCENDING)])
+    await db.industrial_anchors.create_index([("discovered_at", pymongo.ASCENDING)])
     print("Database indexes ensured.")

@@ -46,3 +46,16 @@ backend/exports/*
 # Local caches
 .vercel/
 .render/
+
+# Local dev run logs
+*.log
+backend-local.log
+backend-local.err.log
+frontend-local.log
+frontend-local.err.log
+
+# Claude Code local session config
+.claude/
+
+# Local scratch/audit output
+data/
