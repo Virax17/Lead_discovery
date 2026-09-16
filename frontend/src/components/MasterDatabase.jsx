@@ -3,23 +3,28 @@ import { Download, Database, SlidersHorizontal, X, ChevronLeft, ChevronRight } f
 import { downloadCountryExport, fetchCountryBusinesses, fetchPopulatedCountries } from '../api';
 import { useI18n } from '../i18n/I18nContext';
 
+// Decision-relevant fields first (identity, then the actual verdict and
+// why), internal debug/signal fields after.
 const DEFAULT_COLUMNS = [
     { key: 'source', label: 'Source' },
     { key: 'name', label: 'Company Name' },
     { key: 'address', label: 'Address' },
     { key: 'website', label: 'Website' },
     { key: 'phone_number', label: 'Phone Number' },
-    { key: 'industry_type', label: 'Industry Type' },
     { key: 'crawl_tier', label: 'Crawl Tier' },
-    { key: 'crawl_score', label: 'Crawl Score' },
+    { key: 'business_role', label: 'Business Role' },
+    { key: 'llm_fallback_decision', label: 'LLM Fallback Decision' },
     { key: 'crawl_reason', label: 'Crawl Reason' },
+    { key: 'llm_fallback_reason', label: 'LLM Fallback Reason' },
+    { key: 'industry_type', label: 'Industry Type' },
+    { key: 'crawl_score', label: 'Crawl Score' },
+    { key: 'llm_fallback_status', label: 'LLM Fallback' },
+    { key: 'llm_fallback_confidence', label: 'LLM Fallback Confidence' },
     { key: 'crawl_evidence', label: 'Crawl Evidence' },
-    { key: 'detected_language', label: 'Detected Language' },
     { key: 'positive_concepts', label: 'Positive Concepts' },
     { key: 'negative_concepts', label: 'Negative Concepts' },
-    { key: 'business_role', label: 'Business Role' },
     { key: 'business_role_reason', label: 'Role Reason' },
-    { key: 'llm_fallback_status', label: 'LLM Fallback' },
+    { key: 'detected_language', label: 'Detected Language' },
     { key: 'source_query', label: 'Source Query' },
     { key: 'source_query_language', label: 'Query Language' },
     { key: 'website_signal', label: 'Website Signal' },
@@ -28,6 +33,11 @@ const DEFAULT_COLUMNS = [
     { key: 'last_seen_at', label: 'Last Seen' }
 ];
 
+// The on-screen table is server-paginated and its list endpoint only
+// accepts one tier/role at a time, so it keeps the existing single-select
+// "all" sentinel. The export dialog below uses its own independent
+// multi-select (EXPORT_TIER_FILTERS/EXPORT_ROLE_FILTERS + selected*Keys
+// state), since export_country() already accepts a list either way.
 const TIER_FILTERS = [
     { key: 'all', label: 'All' },
     { key: 'best', label: 'Best' },
@@ -47,6 +57,9 @@ const ROLE_FILTERS = [
     { key: 'generic_local_service', label: 'Generic Service' },
     { key: 'unknown', label: 'Unknown Role' },
 ];
+
+const EXPORT_TIER_FILTERS = TIER_FILTERS.slice(1);
+const EXPORT_ROLE_FILTERS = ROLE_FILTERS.slice(1);
 
 function formatEvidence(value) {
     if (!value || value.length === 0) return '-';
@@ -71,6 +84,11 @@ export default function MasterDatabase() {
     const [selectedColumns, setSelectedColumns] = useState(DEFAULT_COLUMNS.map(column => column.key));
     const [tierFilter, setTierFilter] = useState('all');
     const [roleFilter, setRoleFilter] = useState('all');
+    // Independent multi-select for the export dialog only (see note above
+    // TIER_FILTERS) — defaults to everything checked, uncheck "Reject" to
+    // exclude it from the download in one step.
+    const [exportTierKeys, setExportTierKeys] = useState(EXPORT_TIER_FILTERS.map(f => f.key));
+    const [exportRoleKeys, setExportRoleKeys] = useState(EXPORT_ROLE_FILTERS.map(f => f.key));
     const [downloading, setDownloading] = useState(false);
     const [populatedCountries, setPopulatedCountries] = useState([]);
     const [populatedLoading, setPopulatedLoading] = useState(true);
@@ -110,6 +128,14 @@ export default function MasterDatabase() {
         setSelectedColumns(prev => prev.includes(key) ? prev.filter(value => value !== key) : [...prev, key]);
     };
 
+    const toggleExportTier = (key) => {
+        setExportTierKeys(prev => prev.includes(key) ? prev.filter(value => value !== key) : [...prev, key]);
+    };
+
+    const toggleExportRole = (key) => {
+        setExportRoleKeys(prev => prev.includes(key) ? prev.filter(value => value !== key) : [...prev, key]);
+    };
+
     const handleCountryChange = (value) => {
         setCountry(value);
         setPage(1);
@@ -120,8 +146,10 @@ export default function MasterDatabase() {
     const handleDownload = async (format) => {
         setDownloading(true);
         try {
-            const selectedTiers = tierFilter === 'all' ? [] : [tierFilter];
-            const selectedRoles = roleFilter === 'all' ? [] : [roleFilter];
+            // Everything selected = no filter, matching the backend's
+            // existing "no selected_tiers/selected_roles = no $match" behavior.
+            const selectedTiers = exportTierKeys.length === EXPORT_TIER_FILTERS.length ? [] : exportTierKeys;
+            const selectedRoles = exportRoleKeys.length === EXPORT_ROLE_FILTERS.length ? [] : exportRoleKeys;
             await downloadCountryExport(country, format, exportColumns.map(column => column.label), selectedTiers, selectedRoles);
             setShowExportPicker(false);
         } catch {
@@ -262,17 +290,20 @@ export default function MasterDatabase() {
                                                     {business.website ? <a href={business.website} target="_blank" rel="noreferrer">Website</a> : '-'}
                                                 </td>
                                                 <td className="px-6 py-4 text-sm text-slate-600">{business.phone_number || '-'}</td>
-                                                <td className="px-6 py-4 text-sm text-slate-600">{business.industry_type || '-'}</td>
                                                 <td className="px-6 py-4 text-sm font-semibold capitalize text-slate-700">{business.crawl_tier || 'unknown'}</td>
-                                                <td className="px-6 py-4 text-sm text-slate-600">{business.crawl_score ?? '-'}</td>
+                                                <td className="px-6 py-4 text-sm font-medium text-slate-700">{business.business_role || '-'}</td>
+                                                <td className="px-6 py-4 text-sm font-semibold capitalize text-slate-700">{business.llm_fallback_decision || '-'}</td>
                                                 <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{business.crawl_reason || '-'}</td>
+                                                <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{business.llm_fallback_reason || '-'}</td>
+                                                <td className="px-6 py-4 text-sm text-slate-600">{business.industry_type || '-'}</td>
+                                                <td className="px-6 py-4 text-sm text-slate-600">{business.crawl_score ?? '-'}</td>
+                                                <td className="px-6 py-4 text-sm text-slate-600">{business.llm_fallback_status || '-'}</td>
+                                                <td className="px-6 py-4 text-sm text-slate-600">{business.llm_fallback_confidence ?? '-'}</td>
                                                 <td className="max-w-sm px-6 py-4 text-sm text-slate-600">{formatEvidence(business.crawl_evidence)}</td>
-                                                <td className="px-6 py-4 text-sm text-slate-600">{business.detected_language || '-'}</td>
                                                 <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{formatEvidence(business.positive_concepts)}</td>
                                                 <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{formatEvidence(business.negative_concepts)}</td>
-                                                <td className="px-6 py-4 text-sm font-medium text-slate-700">{business.business_role || '-'}</td>
                                                 <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{business.business_role_reason || '-'}</td>
-                                                <td className="px-6 py-4 text-sm text-slate-600">{business.llm_fallback_status || '-'}</td>
+                                                <td className="px-6 py-4 text-sm text-slate-600">{business.detected_language || '-'}</td>
                                                 <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{business.source_query || '-'}</td>
                                                 <td className="px-6 py-4 text-sm text-slate-600">{business.source_query_language || '-'}</td>
                                                 <td className="px-6 py-4 text-sm text-slate-600">{business.website_signal || '-'}</td>
@@ -331,6 +362,37 @@ export default function MasterDatabase() {
                             <button onClick={() => setShowExportPicker(false)} className="rounded-full p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700">
                                 <X className="h-4 w-4" />
                             </button>
+                        </div>
+
+                        <div className="mt-6">
+                            <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">Tiers to include (uncheck to exclude, e.g. Reject):</p>
+                            <div className="flex flex-wrap gap-2">
+                                {EXPORT_TIER_FILTERS.map(filter => (
+                                    <button
+                                        key={filter.key}
+                                        type="button"
+                                        onClick={() => toggleExportTier(filter.key)}
+                                        aria-pressed={exportTierKeys.includes(filter.key)}
+                                        className={`rounded-full border px-3 py-1.5 text-sm font-medium transition ${exportTierKeys.includes(filter.key) ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-200 bg-white text-slate-400 line-through hover:border-blue-300 hover:text-blue-600'}`}
+                                    >
+                                        {filter.label}
+                                    </button>
+                                ))}
+                            </div>
+                            <p className="mb-2 mt-4 text-xs font-semibold uppercase tracking-wide text-slate-400">Roles to include:</p>
+                            <div className="flex flex-wrap gap-2">
+                                {EXPORT_ROLE_FILTERS.map(filter => (
+                                    <button
+                                        key={filter.key}
+                                        type="button"
+                                        onClick={() => toggleExportRole(filter.key)}
+                                        aria-pressed={exportRoleKeys.includes(filter.key)}
+                                        className={`rounded-full border px-3 py-1.5 text-sm font-medium transition ${exportRoleKeys.includes(filter.key) ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-slate-200 bg-white text-slate-400 line-through hover:border-indigo-300 hover:text-indigo-600'}`}
+                                    >
+                                        {filter.label}
+                                    </button>
+                                ))}
+                            </div>
                         </div>
 
                         <div className="mt-6 grid gap-3 sm:grid-cols-2">

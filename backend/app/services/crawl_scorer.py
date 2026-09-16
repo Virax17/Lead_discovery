@@ -15,25 +15,90 @@ from app.config.crawl_concepts import (
     BUSINESS_ROLE_WEIGHTS,
     CONCEPT_PHRASES,
     CONCEPT_WEIGHTS,
+    CORE_CONCEPTS,
     NEGATIVE_CONCEPT_PHRASES,
     NEGATIVE_CONCEPT_WEIGHTS,
 )
 from app.models.schemas import PlaceDetails
 from app.services.error_logger import log_error
 
-CRAWL_VERSION = "tritorc-crawl-v3"
+# v4: fixed a bug where the search keyword itself (details.source_query) was
+# fed into concept/role matching, trivially "matching" any concept whose
+# phrase list overlapped the keyword (e.g. every "shutdown contractor" result
+# got free credit for the shutdown_turnaround concept) regardless of actual
+# site content. Bumped so every previously-scored business gets re-crawled
+# and re-scored under the corrected logic instead of trusting stale scores.
+# v5: removed the generic "chemical_plant" concept (too broad/inaccurate as a
+# Tritorc target on its own), added "grain_elevator" (fertilizer/agri
+# processing infrastructure — the machinery those plants actually need
+# serviced, not mobile farm-equipment repair) and "structural_bolting"
+# (bridges/heavy civil steel erection — high-strength structural bolting,
+# distinct from residential/civil "construction").
+# v6: fixed llm_fallback._should_request_llm() missing most weak-tier and
+# role-positive-but-concept-empty reject-tier businesses for LLM review
+# (confirmed against a real search: 81% of results never got reviewed).
+# v7: added a core-vs-context concept split (best/strong now require >=1 core
+# concept, not context concepts alone -- confirmed live that a context-only
+# combo could otherwise reach score=100/tier=best with zero real bolting
+# evidence); expanded the taxonomy (joint integrity, torque services, hot
+# bolting, line stopping, LNG, shipyard, mining, cement, nuclear, FPSO);
+# fixed "epc" matching inside unrelated Spanish/Portuguese words via bare
+# substring search; tightened "shutdown"/"turnaround" and the
+# supplier_distributor role phrases to reduce false positives; raised the
+# negative-outweigh reject threshold so a single incidental negative word
+# can't override strong positive evidence on its own. Bumped so every
+# previously-scored business gets re-evaluated under the corrected logic.
+# v8: expanded _detect_language() from 5 to all 87 languages lingua
+# supports -- previously a site in any language other than en/es/fr/pt/de
+# was force-classified as whichever of those 5 looked closest, since the
+# detector was never given any other option. Businesses in a language
+# without real CONCEPT_PHRASES coverage now force an LLM review instead of
+# trusting a rule-engine score computed from the wrong language's phrase
+# list (see WELL_COVERED_LANGUAGES, used in llm_fallback._should_request_llm).
+CRAWL_VERSION = "tritorc-crawl-v8"
 SCORING_VERSION = "role-concept-score-v1"
-MAX_PAGES_PER_SITE = 5
+
+# Languages with real phrase-list coverage in CONCEPT_PHRASES/
+# NEGATIVE_CONCEPT_PHRASES/BUSINESS_ROLE_PHRASES. Derived from the taxonomy
+# itself rather than hardcoded so it can't silently drift out of sync as
+# languages are added.
+WELL_COVERED_LANGUAGES = frozenset(CONCEPT_PHRASES.keys())
+MAX_PAGES_PER_SITE = 10
 MAX_TEXT_CHARS_PER_PAGE = 12000
 MAX_EVIDENCE_ITEMS = 8
 CRAWLER_NAVIGATION_TIMEOUT_SECONDS = 10
 
 PREFERRED_URL_TERMS = (
-    "service", "services", "industries", "industry", "oil", "gas", "refinery",
+    "industries", "industry", "oil", "gas", "refinery",
     "petrochemical", "chemical", "pipeline", "turnaround", "shutdown",
     "maintenance", "machining", "bolting", "flange", "heat-exchanger",
     "heat_exchanger", "hydrotest", "hot-tap", "hot_tap", "about",
+    "integrity", "tensioning", "joint", "calibration", "rental",
 )
+
+# A dedicated "services"/"capabilities" page is the single highest-value page
+# to crawl -- it's where a business states what it actually does, unlike a
+# marketing-focused homepage or a history-focused "about" page. This bonus is
+# large enough that a URL matching one of these terms is crawled ahead of
+# everything else the page budget would otherwise spend on, rather than just
+# nudged up alongside a dozen equally-weighted generic industry words.
+# Includes es/pt/de variants -- confirmed live that "servicios" (a real
+# Spanish services-page URL) doesn't contain the English substring "service",
+# so an English-only list would silently miss it for every non-English site,
+# which is most of this pipeline's actual crawl targets. Spanish "servicio(s)"
+# and Portuguese "serviço(s)" differ by one letter and a diacritic, so a
+# single term doesn't cover both; URL slugs also commonly drop diacritics
+# (serviço -> "servico"), so both the accented and ASCII-transliterated
+# Portuguese spellings are included.
+SERVICE_PAGE_TERMS = (
+    "services", "service", "capabilities", "what-we-do", "what_we_do",
+    "servicio",  # es (servicio, servicios)
+    "serviço",  # pt, accented URL slug (serviço, serviços)
+    "servico",  # pt, ASCII-transliterated URL slug
+    "leistung",  # de (Dienstleistungen, Leistungen)
+    "prestation",  # fr (prestations de service)
+)
+SERVICE_PAGE_PRIORITY_BONUS = 100
 
 NEGATIVE_GOOGLE_TYPES = {
     "school",
@@ -73,6 +138,7 @@ class CrawlScore:
     evidence_original: list[str] = field(default_factory=list)
     evidence_translated: list[str] = field(default_factory=list)
     evidence_urls: list[str] = field(default_factory=list)
+    negative_evidence: list[str] = field(default_factory=list)
     reason: str = ""
     pages_checked: int = 0
     detected_language: str = "unknown"
@@ -112,6 +178,8 @@ def _link_priority(url: str) -> int:
     for term in PREFERRED_URL_TERMS:
         if term in lower:
             score += 10
+    if any(term in lower for term in SERVICE_PAGE_TERMS):
+        score += SERVICE_PAGE_PRIORITY_BONUS
     score -= min(lower.count("/") * 2, 20)
     return score
 
@@ -133,16 +201,22 @@ def _detect_language(text: str, details: PlaceDetails) -> tuple[str, float]:
     sample = _clean_text(text)[:5000]
     if sample:
         try:
-            from lingua import Language, LanguageDetectorBuilder
+            from lingua import LanguageDetectorBuilder
 
-            languages = [
-                Language.ENGLISH,
-                Language.SPANISH,
-                Language.FRENCH,
-                Language.PORTUGUESE,
-                Language.GERMAN,
-            ]
-            detector = LanguageDetectorBuilder.from_languages(*languages).build()
+            # Previously restricted to 5 languages (en/es/fr/pt/de) -- the
+            # only ones with real CONCEPT_PHRASES/BUSINESS_ROLE_PHRASES
+            # coverage. That meant a site in any of the other ~190 countries
+            # this pipeline searches (Arabic, Italian, Chinese, Dutch,
+            # Turkish, etc.) could never be correctly detected at all: lingua
+            # would force-classify it as whichever of those 5 looked closest,
+            # silently feeding the wrong language's phrase list downstream.
+            # lingua supports 87 languages (confirmed) at negligible extra
+            # cost (detector build is near-instant; detection is ~0.5s/page,
+            # fine for a background crawl) -- detecting the TRUE language is
+            # what lets _should_request_llm() force an LLM review for
+            # languages the rule engine has no real taxonomy for, instead of
+            # silently trusting a meaningless score.
+            detector = LanguageDetectorBuilder.from_all_languages().build()
             confidence_values = list(detector.compute_language_confidence_values(sample))
             if confidence_values:
                 best = confidence_values[0]
@@ -256,21 +330,35 @@ def _classify_business_role(
     return ("unknown", score, role_signals, role_negative_signals, "No clear business role evidence found.")
 
 
-def _tier_from_score_and_role(score: int, positive_score: int, negative_score: int, role: str) -> str:
+def _tier_from_score_and_role(score: int, positive_score: int, negative_score: int, role: str, positive_concepts: list[str]) -> str:
     if role in {"competitor_manufacturer", "generic_local_service"}:
         return "reject"
     if role == "supplier_distributor":
         return "reject"
-    if negative_score >= 28 and positive_score < 40:
+    # Raised from 28: most negative weights are 24-35, so a single incidental
+    # negative mention (a client-list entry, an unrelated past project) could
+    # force a reject on its own even with strong positive evidence. No single
+    # weight reaches 45, so this now requires at least two distinct negative
+    # concepts -- matching "outweigh", not "one word".
+    if negative_score >= 45 and positive_score < 40:
         return "reject"
+    # Best/strong require at least one CORE concept (direct evidence of
+    # bolting/machining/integrity work), not context concepts alone --
+    # confirmed live that oil_gas + refinery + industrial_maintenance +
+    # power_plant + a role phrase alone could otherwise reach score=100.
+    has_core = any(concept in CORE_CONCEPTS for concept in positive_concepts)
     if role == "unknown":
+        if has_core and score >= 85:
+            return "best"
+        if has_core and score >= 70:
+            return "strong"
         if score >= 70:
             return "weak"
         return "weak" if positive_score >= 35 else "reject"
     if score >= 85:
-        return "best"
+        return "best" if has_core else "strong"
     if score >= 70:
-        return "strong"
+        return "strong" if has_core else "weak"
     if score >= 40:
         return "weak"
     return "weak" if positive_score >= 30 else "reject"
@@ -373,8 +461,20 @@ def score_crawl(details: PlaceDetails, pages: list[CrawledPage]) -> CrawlScore:
             pages_checked=0,
         )
 
-    combined = "\n".join([details.name, details.address, details.source_query or ""] + [p.text for p in pages])
-    detected_language, language_confidence = _detect_language(combined, details)
+    # `details.source_query` is the literal search keyword used to find this
+    # business (e.g. "shutdown contractor in Alberta, Canada") — it must NOT
+    # feed concept/role matching, since every business found by a keyword
+    # search would then trivially "match" that keyword's own concept purely
+    # because it was searched for, regardless of what the site actually says
+    # (confirmed: this was silently crediting every "shutdown contractor"
+    # result with the shutdown_turnaround concept, since that concept's own
+    # phrase list contains "shutdown" — explaining crawl_evidence coming back
+    # empty for concept matches that never actually appeared on the site).
+    # It's kept only for language detection below, where a bad guess merely
+    # falls back to English rather than fabricating scoring evidence.
+    language_hint = "\n".join([details.name, details.address, details.source_query or ""])
+    combined = "\n".join([details.name, details.address] + [p.text for p in pages])
+    detected_language, language_confidence = _detect_language(language_hint + "\n" + combined, details)
     scoring_language = detected_language if detected_language in CONCEPT_PHRASES else "en"
     positive_concepts, positive_phrases = _find_concepts(combined, CONCEPT_PHRASES, scoring_language)
     negative_concepts, negative_phrases = _find_concepts(combined, NEGATIVE_CONCEPT_PHRASES, scoring_language)
@@ -396,7 +496,7 @@ def score_crawl(details: PlaceDetails, pages: list[CrawledPage]) -> CrawlScore:
             score += 8
         score = min(100, score)
 
-    tier = _tier_from_score_and_role(score, positive_score, negative_score, business_role)
+    tier = _tier_from_score_and_role(score, positive_score, negative_score, business_role, positive_concepts)
 
     evidence = []
     evidence_urls = []
@@ -406,6 +506,17 @@ def score_crawl(details: PlaceDetails, pages: list[CrawledPage]) -> CrawlScore:
             snippet, url = item
             evidence.append(snippet)
             evidence_urls.append(url)
+
+    # Quoted, not just named -- the LLM prompt's failure-mode-1 guidance asks
+    # it to judge whether a negative mention is incidental or describes the
+    # business's own core work, which requires the actual text, not just the
+    # concept's bare name.
+    negative_evidence = []
+    for concept in negative_concepts[:MAX_EVIDENCE_ITEMS]:
+        item = _evidence_for_phrase(pages, concept, negative_phrases[concept])
+        if item:
+            snippet, _url = item
+            negative_evidence.append(snippet)
 
     if business_role in {"competitor_manufacturer", "supplier_distributor", "generic_local_service"}:
         reason = f"{role_reason} Industrial concepts: {', '.join(positive_concepts[:5]) or 'none'}."
@@ -425,6 +536,7 @@ def score_crawl(details: PlaceDetails, pages: list[CrawledPage]) -> CrawlScore:
         evidence=evidence,
         evidence_original=evidence,
         evidence_urls=evidence_urls,
+        negative_evidence=negative_evidence,
         reason=reason,
         pages_checked=len(pages),
         detected_language=detected_language,
@@ -468,7 +580,7 @@ async def crawl_business_website(details: PlaceDetails, max_pages: int = MAX_PAG
 
     crawler = BeautifulSoupCrawler(
         max_requests_per_crawl=max_pages,
-        max_crawl_depth=1,
+        max_crawl_depth=2,
         max_request_retries=1,
         max_session_rotations=0,
         retry_on_blocked=False,
@@ -534,6 +646,7 @@ def crawl_score_payload(score: CrawlScore) -> dict:
         "crawl_evidence_original": score.evidence_original or score.evidence,
         "crawl_evidence_translated": score.evidence_translated,
         "crawl_evidence_urls": score.evidence_urls,
+        "crawl_negative_evidence": score.negative_evidence,
         "crawl_reason": score.reason,
         "crawl_checked_at": datetime.utcnow(),
         "crawl_version": CRAWL_VERSION,

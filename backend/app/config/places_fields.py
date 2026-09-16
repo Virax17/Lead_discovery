@@ -1,2 +1,2 @@
-TEXT_SEARCH_FIELD_MASK = "places.id,places.displayName,places.formattedAddress,places.addressComponents,places.websiteUri,places.internationalPhoneNumber,places.googleMapsUri,places.businessStatus,places.types,places.primaryType,places.primaryTypeDisplayName,nextPageToken"
+TEXT_SEARCH_FIELD_MASK = "places.id,places.displayName,places.formattedAddress,places.addressComponents,places.websiteUri,places.internationalPhoneNumber,places.googleMapsUri,places.businessStatus,places.types,places.primaryType,places.primaryTypeDisplayName,places.location,nextPageToken"
 PLACE_DETAILS_FIELD_MASK = "id,displayName,formattedAddress,addressComponents,websiteUri,internationalPhoneNumber,googleMapsUri,businessStatus,types,primaryType,primaryTypeDisplayName"

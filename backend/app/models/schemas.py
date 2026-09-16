@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, ConfigDict, field_validator
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
 from typing import Optional, List
 from datetime import datetime
 from bson import ObjectId
@@ -97,6 +97,9 @@ class Search(BaseModel):
     country_code: Optional[str] = None
     state: Optional[str] = None
     city: Optional[str] = None
+    center_lat: Optional[float] = None
+    center_lng: Optional[float] = None
+    radius_km: Optional[float] = None
     max_results: int
     status: str
     keywords_total: int
@@ -149,11 +152,23 @@ class SearchCreate(BaseModel):
     keywords: List[str]
     industries: List[str]
     website_only: bool = True
+    center_lat: Optional[float] = None
+    center_lng: Optional[float] = None
+    # Google's locationBias.circle.radius is hard-capped at 50000m (50km) --
+    # see LOCATION_BIAS_RADIUS_METERS in search_runner.py.
+    radius_km: Optional[float] = Field(default=None, gt=0, le=50)
 
     @field_validator("country_code")
     @classmethod
     def _normalize_country_code(cls, v: Optional[str]) -> Optional[str]:
         return v.upper() if v else v
+
+    @model_validator(mode="after")
+    def _validate_custom_area(self):
+        provided = [self.center_lat, self.center_lng, self.radius_km]
+        if any(v is not None for v in provided) and not all(v is not None for v in provided):
+            raise ValueError("center_lat, center_lng, and radius_km must all be provided together.")
+        return self
 
 class SearchStatusResponse(BaseModel):
     id: str
@@ -176,6 +191,8 @@ class PlaceDetails(BaseModel):
     google_maps_uri: Optional[str] = None
     source_query: Optional[str] = None
     source_query_language: Optional[str] = None
+    lat: Optional[float] = None
+    lng: Optional[float] = None
 
 class AppSettings(BaseModel):
     id: str = Field(alias="_id", default="singleton")

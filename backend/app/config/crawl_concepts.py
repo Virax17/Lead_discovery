@@ -1,3 +1,19 @@
+# Core concepts are direct evidence of the bolted-joint/onsite-machining/
+# pipeline-integrity work Tritorc's tools are actually used for. Context
+# concepts only identify an industry sector -- necessary but not sufficient,
+# since any company adjacent to oil & gas/power/steel can mention them
+# without ever doing bolting, tensioning, or machining work. Verified live
+# that context-only concepts (oil_gas + refinery + industrial_maintenance +
+# power_plant + a role phrase) can otherwise sum to score=100/tier=best with
+# zero real evidence of Tritorc-relevant work -- see CORE_CONCEPTS gating in
+# _tier_from_score_and_role().
+CORE_CONCEPTS = {
+    "controlled_bolting", "bolt_tensioning", "flange_management", "flange_facing",
+    "onsite_machining", "hot_tapping", "pipeline_integrity", "pipeline_maintenance",
+    "hydrotesting", "leak_sealing", "heat_exchanger", "retubing", "structural_bolting",
+    "joint_integrity", "torque_services", "hot_bolting", "line_stopping",
+}
+
 CONCEPT_WEIGHTS = {
     "controlled_bolting": 20,
     "bolt_tensioning": 18,
@@ -15,14 +31,25 @@ CONCEPT_WEIGHTS = {
     "oil_gas": 14,
     "refinery": 16,
     "petrochemical": 16,
-    "chemical_plant": 16,
     "fertilizer_plant": 14,
+    "grain_elevator": 14,
     "power_plant": 14,
     "steel_plant": 14,
     "wind_turbine": 14,
     "epc": 12,
     "industrial_maintenance": 12,
     "pressure_vessel": 14,
+    "structural_bolting": 18,
+    "joint_integrity": 20,
+    "torque_services": 16,
+    "hot_bolting": 18,
+    "line_stopping": 16,
+    "lng": 14,
+    "shipyard": 14,
+    "mining": 12,
+    "cement_plant": 14,
+    "nuclear": 14,
+    "fpso": 14,
 }
 
 NEGATIVE_CONCEPT_WEIGHTS = {
@@ -58,18 +85,36 @@ CONCEPT_PHRASES = {
         "leak_sealing": ["leak sealing", "online leak sealing"],
         "heat_exchanger": ["heat exchanger"],
         "retubing": ["retubing", "re-tubing"],
-        "shutdown_turnaround": ["shutdown", "turnaround", "plant shutdown"],
+        # Bare "shutdown"/"turnaround" matched unrelated uses (e.g. "emergency
+        # shutdown valve", "turnaround time") -- these compound phrases are
+        # specific to a plant maintenance event.
+        "shutdown_turnaround": ["plant shutdown", "shutdown maintenance", "turnaround maintenance", "shutdown services", "plant turnaround"],
         "oil_gas": ["oil and gas", "oil & gas"],
         "refinery": ["refinery", "refineries"],
         "petrochemical": ["petrochemical"],
-        "chemical_plant": ["chemical plant"],
-        "fertilizer_plant": ["fertilizer"],
+        "fertilizer_plant": ["fertilizer plant", "fertilizer terminal", "fertilizer production"],
+        "grain_elevator": ["grain elevator", "grain terminal", "agri-processing plant", "agricultural processing plant"],
         "power_plant": ["power plant"],
         "steel_plant": ["steel plant", "steel mill"],
         "wind_turbine": ["wind turbine"],
-        "epc": ["epc"],
+        # The bare 3-letter acronym "epc" is a substring match (see
+        # _find_concepts) and was confirmed to match inside unrelated
+        # Spanish/Portuguese words like "recepción"/"recepção" (reception).
+        # Specific multi-word phrases avoid that false-positive class.
+        "epc": ["epc contractor", "epc project", "epc services", "engineering, procurement and construction"],
         "industrial_maintenance": ["industrial maintenance"],
         "pressure_vessel": ["pressure vessel"],
+        "structural_bolting": ["structural bolting", "high strength bolting", "high-strength bolts", "structural steel erection", "friction grip bolting", "bridge construction"],
+        "joint_integrity": ["joint integrity", "flange joint integrity", "bolted joint"],
+        "torque_services": ["torque wrench", "torquing services", "bolting services"],
+        "hot_bolting": ["hot bolting"],
+        "line_stopping": ["line stopping", "line stop"],
+        "lng": ["lng terminal", "liquefied natural gas"],
+        "shipyard": ["shipyard", "ship repair"],
+        "mining": ["mining", "mineral processing"],
+        "cement_plant": ["cement plant"],
+        "nuclear": ["nuclear power plant", "nuclear outage"],
+        "fpso": ["fpso", "offshore platform"],
     },
     "es": {
         "shutdown_turnaround": ["parada de planta", "mantenimiento de parada"],
@@ -85,10 +130,9 @@ CONCEPT_PHRASES = {
         "oil_gas": ["petróleo y gas", "oil and gas"],
         "refinery": ["refinería", "refinerias"],
         "petrochemical": ["petroquímica"],
-        "chemical_plant": ["planta química"],
         "power_plant": ["central eléctrica"],
         "steel_plant": ["planta siderúrgica", "acería"],
-        "epc": ["epc"],
+        "epc": ["contratista epc", "proyecto epc", "epc contractor"],
     },
     "fr": {
         "shutdown_turnaround": ["arrêt technique", "arrêt de maintenance"],
@@ -104,10 +148,9 @@ CONCEPT_PHRASES = {
         "oil_gas": ["pétrole et gaz", "oil and gas"],
         "refinery": ["raffinerie"],
         "petrochemical": ["pétrochimie", "pétrochimique"],
-        "chemical_plant": ["usine chimique"],
         "power_plant": ["centrale électrique"],
         "steel_plant": ["aciérie"],
-        "epc": ["epc"],
+        "epc": ["contractant epc", "projet epc", "epc contractor"],
     },
     "pt": {
         "shutdown_turnaround": ["parada de manutenção", "parada de planta"],
@@ -123,10 +166,9 @@ CONCEPT_PHRASES = {
         "oil_gas": ["óleo e gás", "petróleo e gás", "oil and gas"],
         "refinery": ["refinaria"],
         "petrochemical": ["petroquímica"],
-        "chemical_plant": ["planta química"],
         "power_plant": ["usina elétrica"],
         "steel_plant": ["siderúrgica"],
-        "epc": ["epc"],
+        "epc": ["contratante epc", "projeto epc", "epc contractor"],
     },
     "de": {
         "shutdown_turnaround": ["anlagenstillstand", "wartungsstillstand"],
@@ -141,10 +183,9 @@ CONCEPT_PHRASES = {
         "oil_gas": ["öl und gas"],
         "refinery": ["raffinerie"],
         "petrochemical": ["petrochemie"],
-        "chemical_plant": ["chemieanlage"],
         "power_plant": ["kraftwerk"],
         "steel_plant": ["stahlwerk"],
-        "epc": ["epc"],
+        "epc": ["epc-auftragnehmer", "epc-projekt", "epc contractor"],
     },
 }
 
@@ -204,9 +245,10 @@ BUSINESS_ROLE_PHRASES = {
             "pipeline operator",
             "plant operator",
             "terminal operator",
-            "chemical plant",
             "petrochemical plant",
             "fertilizer plant",
+            "grain elevator",
+            "grain terminal",
             "power plant",
             "steel mill",
             "wind farm",
@@ -232,17 +274,18 @@ BUSINESS_ROLE_PHRASES = {
             "industrial construction",
             "process plant construction",
             "oil and gas construction",
+            "structural steel erection",
+            "bridge construction",
+            "heavy civil construction",
         ],
+        # Bare "supplier"/"distributor"/"catalog"/"product range"/"sales of"
+        # were removed: these are common in any B2B site's language and don't
+        # specifically indicate reselling Tritorc-category tools -- kept only
+        # the tool-specific phrasing below.
         "supplier_distributor": [
             "authorized distributor",
-            "distributor",
-            "supplier",
             "reseller",
             "stockist",
-            "catalog",
-            "product range",
-            "sales of",
-            "we sell",
             "rental tools",
             "tool rental",
             "valve supplier",
@@ -288,7 +331,6 @@ BUSINESS_ROLE_PHRASES = {
             "operador de refinería",
             "operador de ductos",
             "operador de planta",
-            "planta química",
             "planta petroquímica",
             "planta de fertilizantes",
             "central eléctrica",
@@ -318,16 +360,14 @@ BUSINESS_ROLE_PHRASES = {
             "construcción industrial",
             "obras industriales",
         ],
+        # Bare "distribuidor"/"representante"/"venta de"/"catálogo"/"stock" and
+        # bare "válvulas"/"fittings"/"mangueras" removed -- same false-positive
+        # risk as the English list's bare "supplier"/"distributor"; kept only
+        # tool-specific compound phrasing.
         "supplier_distributor": [
             "distribuidor autorizado",
-            "distribuidor",
-            "representante",
-            "venta de",
-            "catálogo",
-            "stock",
-            "válvulas",
-            "fittings",
-            "mangueras",
+            "proveedor de válvulas",
+            "proveedor de mangueras",
             "herramientas hidráulicas",
             "máquinas herramientas",
             "máquinas cnc",
@@ -362,19 +402,19 @@ BUSINESS_ROLE_PHRASES = {
     },
     "fr": {
         "industrial_service_contractor": ["maintenance industrielle", "arrêt technique", "usinage sur site", "essai hydrostatique"],
-        "supplier_distributor": ["distributeur", "fournisseur", "catalogue", "vente de", "vannes", "raccords"],
+        "supplier_distributor": ["distributeur agréé", "fournisseur de vannes", "fournisseur de raccords", "outils hydrauliques"],
         "competitor_manufacturer": ["clé dynamométrique hydraulique", "tendeur de boulons", "outils hydrauliques", "hytorc", "enerpac"],
         "generic_local_service": ["maintenance bâtiment", "rénovation", "plomberie", "climatisation"],
     },
     "pt": {
         "industrial_service_contractor": ["manutenção industrial", "parada de manutenção", "integridade de dutos", "teste hidrostático"],
-        "supplier_distributor": ["distribuidor", "fornecedor", "catálogo", "venda de", "válvulas", "mangueiras"],
+        "supplier_distributor": ["distribuidor autorizado", "fornecedor de válvulas", "fornecedor de mangueiras", "ferramentas hidráulicas"],
         "competitor_manufacturer": ["chave de torque hidráulica", "tensionador de parafusos", "ferramentas hidráulicas", "hytorc", "enerpac"],
         "generic_local_service": ["manutenção predial", "reforma", "encanamento", "ar condicionado"],
     },
     "de": {
         "industrial_service_contractor": ["industrielle instandhaltung", "anlagenstillstand", "pipeline-integrität", "hydrostatische prüfung"],
-        "supplier_distributor": ["händler", "lieferant", "katalog", "vertrieb", "ventile"],
+        "supplier_distributor": ["autorisierter händler", "ventilhändler", "hydraulikwerkzeuge"],
         "competitor_manufacturer": ["hydraulischer drehmomentschlüssel", "bolzenspanner", "hydraulikwerkzeuge", "hytorc", "enerpac"],
         "generic_local_service": ["gebäudewartung", "renovierung", "sanitär", "klimaanlage"],
     },

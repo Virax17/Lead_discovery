@@ -10,6 +10,11 @@ from app.services.error_logger import log_error
 
 from urllib.parse import urlparse, urlunparse
 
+# Google's Text Search serves at most 20 results per page and hard-stops after
+# 3 pages, dropping nextPageToken at 60 results however many actually match.
+GOOGLE_RESULT_CEILING = 60
+
+
 class QuotaBlockedError(Exception):
     pass
 
@@ -59,6 +64,7 @@ def _country_code_from_components(address_components: list[dict]) -> str | None:
 
 
 def _details_from_place_payload(place: dict, source_query: str | None = None) -> PlaceDetails:
+    location = place.get("location") or {}
     return PlaceDetails(
         name=place.get("displayName", {}).get("text", "Unknown"),
         address=place.get("formattedAddress", "Unknown"),
@@ -72,6 +78,8 @@ def _details_from_place_payload(place: dict, source_query: str | None = None) ->
         google_maps_uri=place.get("googleMapsUri"),
         source_query=source_query,
         source_query_language=_detect_query_language(source_query),
+        lat=location.get("latitude"),
+        lng=location.get("longitude"),
     )
 
 
@@ -85,7 +93,31 @@ def _detect_query_language(query: str | None) -> str:
     return "en"
 
 
-def _build_text_queries(keyword: str, location: str, industries: list[str] | None = None, country_code: str | None = None) -> list[tuple[str, str]]:
+def _build_text_queries(
+    keyword: str,
+    location: str,
+    industries: list[str] | None = None,
+    country_code: str | None = None,
+    single_variant: bool = False,
+    bare_keyword: bool = False,
+) -> list[tuple[str, str]]:
+    # single_variant is used during auto fan-out: multiplying the full ~20+
+    # phrasing variants below by every location searched makes a first-time
+    # country sweep cost thousands of Google calls. One plain phrasing per
+    # (location, keyword) pair keeps a full sweep affordable. Manual
+    # single-location searches are unaffected (single_variant stays False),
+    # keeping full variant richness there.
+    if single_variant:
+        # When a real locationBias circle is doing the geographic targeting,
+        # the query text must NOT also contain a location phrase — Google's
+        # Text Search silently ignores locationBias if textQuery already
+        # names a place (confirmed against current API docs). Only the
+        # text-only fan-out path (no locationBias available) uses the
+        # "{keyword} in {location}" phrasing.
+        if bare_keyword:
+            return [(keyword.strip(), "en")]
+        return [(BUSINESS_SEARCH_VARIANTS[0].format(keyword=keyword, location=location).strip(), "en")]
+
     queries: list[tuple[str, str]] = []
     seen: set[str] = set()
 
@@ -115,7 +147,7 @@ def _build_text_queries(keyword: str, location: str, industries: list[str] | Non
     return queries
 
 async def text_search_ids(keyword: str, country: str, state: str | None, city: str | None, max_results: int, country_code: str | None = None) -> list[str]:
-    results, _calls_used = await text_search_places(keyword, country, state, city, max_results, country_code=country_code)
+    results, _calls_used, _has_more = await text_search_places(keyword, country, state, city, max_results, country_code=country_code)
     return [place_id for place_id, _details in results]
 
 
@@ -128,11 +160,17 @@ async def text_search_places(
     country_code: str | None = None,
     industries: list[str] | None = None,
     username: str | None = None,
-) -> tuple[list[tuple[str, PlaceDetails]], int]:
-    # Build query
+    single_variant: bool = False,
+    location_bias: dict | None = None,
+) -> tuple[list[tuple[str, PlaceDetails]], int, bool]:
+    # Build query. location_bias (a real lat/lng circle) replaces the text
+    # location phrase when provided — see _build_text_queries' bare_keyword note.
     location_parts = [city, state, country]
     location = ", ".join(filter(None, location_parts))
-    queries = _build_text_queries(keyword, location, industries, country_code)
+    queries = _build_text_queries(
+        keyword, location, industries, country_code,
+        single_variant=single_variant, bare_keyword=bool(location_bias),
+    )
 
     max_results = min(max_results, 100)
 
@@ -146,6 +184,7 @@ async def text_search_places(
     results: list[tuple[str, PlaceDetails]] = []
     seen_place_ids: set[str] = set()
     calls_used = 0
+    has_more = False
 
     async with httpx.AsyncClient(timeout=20.0) as client:
         for query, query_language in queries:
@@ -156,48 +195,77 @@ async def text_search_places(
                 }
                 if country_code:
                     payload["regionCode"] = country_code
+                if location_bias:
+                    payload["locationBias"] = location_bias
                 if page_token:
                     payload["pageToken"] = page_token
 
-                try:
-                    status = await check_quota_before_call(username=username)
-                    if status in {"BLOCKED", "USER_BLOCKED"}:
-                        raise QuotaBlockedError("Monthly quota limit reached.")
+                # A transient error (network blip, momentary 5xx) here used to
+                # permanently abandon this query with no retry, unlike
+                # get_place_details() below which already retries. A single
+                # hiccup could silently drop an entire (state, keyword) pair's
+                # results for the run.
+                give_up_on_query = False
+                for attempt in range(MAX_RETRIES + 1):
+                    try:
+                        status = await check_quota_before_call(username=username)
+                        if status in {"BLOCKED", "USER_BLOCKED"}:
+                            raise QuotaBlockedError("Monthly quota limit reached.")
 
-                    response = await client.post(url, headers=headers, json=payload)
-                    if response.status_code == 429:
-                        await log_error(search_id=None, stage="text_search_rate_limited", place_id=None, error_message=response.text[:1000])
-                        raise GoogleRateLimitedError("Google Places Text Search rate limit reached.")
-                    response.raise_for_status()
-                    await increment_usage(username=username)
-                    calls_used += 1
-                    data = response.json()
+                        response = await client.post(url, headers=headers, json=payload)
+                        if response.status_code == 429:
+                            await log_error(search_id=None, stage="text_search_rate_limited", place_id=None, error_message=response.text[:1000])
+                            raise GoogleRateLimitedError("Google Places Text Search rate limit reached.")
+                        response.raise_for_status()
+                        await increment_usage(username=username)
+                        calls_used += 1
+                        data = response.json()
 
-                    places = data.get("places", [])
-                    for p in places:
-                        place_id = p.get("id")
-                        if place_id and place_id not in seen_place_ids:
-                            seen_place_ids.add(place_id)
-                            details = _details_from_place_payload(p, source_query=query)
-                            details.source_query_language = query_language
-                            results.append((place_id, details))
-                            if len(results) >= max_results:
-                                break
+                        places = data.get("places", [])
+                        for p in places:
+                            place_id = p.get("id")
+                            if place_id and place_id not in seen_place_ids:
+                                seen_place_ids.add(place_id)
+                                details = _details_from_place_payload(p, source_query=query)
+                                details.source_query_language = query_language
+                                results.append((place_id, details))
+                                if len(results) >= max_results:
+                                    break
 
-                    page_token = data.get("nextPageToken")
-                    if not page_token:
+                        page_token = data.get("nextPageToken")
                         break
-                except GoogleRateLimitedError:
-                    raise
-                except QuotaBlockedError:
-                    raise
-                except Exception as e:
-                    await log_error(search_id=None, stage="text_search", place_id=None, error_message=f"{query}: {str(e)}")
+                    except GoogleRateLimitedError:
+                        raise
+                    except QuotaBlockedError:
+                        raise
+                    except Exception as e:
+                        if attempt < MAX_RETRIES:
+                            await asyncio.sleep(BACKOFF_SECONDS[attempt])
+                            continue
+                        await log_error(search_id=None, stage="text_search", place_id=None, error_message=f"{query}: {str(e)}")
+                        give_up_on_query = True
+
+                if give_up_on_query or not page_token:
                     break
+            # Saturation signal for the fan-out's adaptive drill-down.
+            #
+            # Google's Text Search serves at most 20 results per page and
+            # hard-stops after 3 pages, dropping nextPageToken at 60 results
+            # no matter how many businesses actually match. So "we hit our own
+            # max_results while a page token remained" is unreachable whenever
+            # max_results exceeds 60 (the UI default is 100) — which silently
+            # disabled drill-down entirely. Verified against the live API:
+            # max_results=100 on a dense area returns exactly 60 and no token.
+            #
+            # The signal that actually means "there is more here than we could
+            # retrieve" is filling whichever ceiling bound us first: Google's
+            # own, or our smaller per-query budget.
+            if not give_up_on_query and len(results) >= min(max_results, GOOGLE_RESULT_CEILING):
+                has_more = True
             if len(results) >= max_results:
                 break
 
-    return results, calls_used
+    return results, calls_used, has_more
 
 def _clean_url(url: str | None) -> str | None:
     if not url:

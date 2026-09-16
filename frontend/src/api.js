@@ -203,6 +203,14 @@ export async function createSearch(payload) {
     return res.json();
 }
 
+export async function cancelSearch(id) {
+    const res = await authorizedFetch(`${API_BASE}/searches/${id}/cancel`, {
+        method: "POST",
+    });
+    if (!res.ok) throw new Error("Failed to stop search");
+    return res.json();
+}
+
 export async function fetchSearch(id) {
     const res = await authorizedFetch(`${API_BASE}/searches/${id}`);
     if (!res.ok) throw new Error("Failed to fetch search");

@@ -5,23 +5,29 @@ import { downloadFile, fetchSearch } from '../api';
 import { useI18n } from '../i18n/I18nContext';
 import { useShell } from '../context/ShellContext';
 
+// Decision-relevant fields first (identity, then the actual verdict and
+// why), internal debug/signal fields after — so the columns that matter
+// for "is this a real lead" aren't buried behind crawler internals.
 const DEFAULT_COLUMNS = [
     { key: 'source', label: 'Source' },
     { key: 'name', label: 'Company Name' },
     { key: 'address', label: 'Address' },
     { key: 'website', label: 'Website' },
     { key: 'phone_number', label: 'Phone Number' },
-    { key: 'industry_type', label: 'Industry Type' },
     { key: 'crawl_tier', label: 'Crawl Tier' },
-    { key: 'crawl_score', label: 'Crawl Score' },
+    { key: 'business_role', label: 'Business Role' },
+    { key: 'llm_fallback_decision', label: 'LLM Fallback Decision' },
     { key: 'crawl_reason', label: 'Crawl Reason' },
+    { key: 'llm_fallback_reason', label: 'LLM Fallback Reason' },
+    { key: 'industry_type', label: 'Industry Type' },
+    { key: 'crawl_score', label: 'Crawl Score' },
+    { key: 'llm_fallback_status', label: 'LLM Fallback' },
+    { key: 'llm_fallback_confidence', label: 'LLM Fallback Confidence' },
     { key: 'crawl_evidence', label: 'Crawl Evidence' },
-    { key: 'detected_language', label: 'Detected Language' },
     { key: 'positive_concepts', label: 'Positive Concepts' },
     { key: 'negative_concepts', label: 'Negative Concepts' },
-    { key: 'business_role', label: 'Business Role' },
     { key: 'business_role_reason', label: 'Role Reason' },
-    { key: 'llm_fallback_status', label: 'LLM Fallback' },
+    { key: 'detected_language', label: 'Detected Language' },
     { key: 'source_query', label: 'Source Query' },
     { key: 'source_query_language', label: 'Query Language' },
     { key: 'website_signal', label: 'Website Signal' },
@@ -29,7 +35,6 @@ const DEFAULT_COLUMNS = [
 ];
 
 const TIER_FILTERS = [
-    { key: 'all', label: 'All' },
     { key: 'best', label: 'Best' },
     { key: 'strong', label: 'Strong' },
     { key: 'weak', label: 'Weak' },
@@ -38,7 +43,6 @@ const TIER_FILTERS = [
 ];
 
 const ROLE_FILTERS = [
-    { key: 'all', label: 'All Roles' },
     { key: 'end_user_operator', label: 'End-user' },
     { key: 'industrial_service_contractor', label: 'Service Contractor' },
     { key: 'epc_contractor', label: 'EPC' },
@@ -63,8 +67,12 @@ export default function Results() {
     const [loading, setLoading] = useState(true);
     const [showExportPicker, setShowExportPicker] = useState(false);
     const [selectedColumns, setSelectedColumns] = useState(DEFAULT_COLUMNS.map(column => column.key));
-    const [tierFilter, setTierFilter] = useState('all');
-    const [roleFilter, setRoleFilter] = useState('all');
+    // Multi-select, defaulting to everything checked (identical to the old
+    // "all" behavior) — uncheck "Reject" to exclude it from both the table
+    // and the download in one step, instead of only being able to view/
+    // export exactly one tier at a time.
+    const [selectedTierKeys, setSelectedTierKeys] = useState(TIER_FILTERS.map(f => f.key));
+    const [selectedRoleKeys, setSelectedRoleKeys] = useState(ROLE_FILTERS.map(f => f.key));
 
     React.useEffect(() => {
         fetchSearch(id).then(data => {
@@ -79,11 +87,11 @@ export default function Results() {
     const businesses = searchData?.businesses || [];
     const filteredBusinesses = useMemo(
         () => businesses.filter(business => {
-            const tierMatch = tierFilter === 'all' || (business.crawl_tier || 'unknown') === tierFilter;
-            const roleMatch = roleFilter === 'all' || (business.business_role || 'unknown') === roleFilter;
+            const tierMatch = selectedTierKeys.includes(business.crawl_tier || 'unknown');
+            const roleMatch = selectedRoleKeys.includes(business.business_role || 'unknown');
             return tierMatch && roleMatch;
         }),
-        [businesses, tierFilter, roleFilter]
+        [businesses, selectedTierKeys, selectedRoleKeys]
     );
     const quotaLimited = searchData?.status === 'completed_quota_limited';
     const rateLimited = searchData?.status === 'completed_rate_limited';
@@ -94,9 +102,19 @@ export default function Results() {
         setSelectedColumns(prev => prev.includes(key) ? prev.filter(value => value !== key) : [...prev, key]);
     };
 
+    const toggleTier = (key) => {
+        setSelectedTierKeys(prev => prev.includes(key) ? prev.filter(value => value !== key) : [...prev, key]);
+    };
+
+    const toggleRole = (key) => {
+        setSelectedRoleKeys(prev => prev.includes(key) ? prev.filter(value => value !== key) : [...prev, key]);
+    };
+
     const handleDownload = async (format) => {
-        const selectedTiers = tierFilter === 'all' ? [] : [tierFilter];
-        const selectedRoles = roleFilter === 'all' ? [] : [roleFilter];
+        // Everything selected = no filter, matching the backend's existing
+        // "no selected_tiers/selected_roles = no $match stage" behavior.
+        const selectedTiers = selectedTierKeys.length === TIER_FILTERS.length ? [] : selectedTierKeys;
+        const selectedRoles = selectedRoleKeys.length === ROLE_FILTERS.length ? [] : selectedRoleKeys;
         await downloadFile(id, format, exportColumns.map(column => column.label), selectedTiers, selectedRoles);
         setShowExportPicker(false);
     };
@@ -163,25 +181,29 @@ export default function Results() {
                 )}
 
                 <div className="overflow-x-auto px-8 pb-8">
-                    <div className="mb-4 flex flex-wrap gap-2">
+                    <div className="mb-2 flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">Tiers (uncheck to exclude, e.g. Reject):</span>
                         {TIER_FILTERS.map(filter => (
                             <button
                                 key={filter.key}
                                 type="button"
-                                onClick={() => setTierFilter(filter.key)}
-                                className={`rounded-full border px-4 py-2 text-sm font-medium transition ${tierFilter === filter.key ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-200 bg-white text-slate-600 hover:border-blue-300 hover:text-blue-600'}`}
+                                onClick={() => toggleTier(filter.key)}
+                                aria-pressed={selectedTierKeys.includes(filter.key)}
+                                className={`rounded-full border px-4 py-2 text-sm font-medium transition ${selectedTierKeys.includes(filter.key) ? 'border-blue-600 bg-blue-600 text-white' : 'border-slate-200 bg-white text-slate-400 line-through hover:border-blue-300 hover:text-blue-600'}`}
                             >
                                 {filter.label}
                             </button>
                         ))}
                     </div>
-                    <div className="mb-4 flex flex-wrap gap-2">
+                    <div className="mb-4 flex flex-wrap items-center gap-2">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">Roles:</span>
                         {ROLE_FILTERS.map(filter => (
                             <button
                                 key={filter.key}
                                 type="button"
-                                onClick={() => setRoleFilter(filter.key)}
-                                className={`rounded-full border px-4 py-2 text-sm font-medium transition ${roleFilter === filter.key ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-slate-200 bg-white text-slate-600 hover:border-indigo-300 hover:text-indigo-600'}`}
+                                onClick={() => toggleRole(filter.key)}
+                                aria-pressed={selectedRoleKeys.includes(filter.key)}
+                                className={`rounded-full border px-4 py-2 text-sm font-medium transition ${selectedRoleKeys.includes(filter.key) ? 'border-indigo-600 bg-indigo-600 text-white' : 'border-slate-200 bg-white text-slate-400 line-through hover:border-indigo-300 hover:text-indigo-600'}`}
                             >
                                 {filter.label}
                             </button>
@@ -207,17 +229,20 @@ export default function Results() {
                                         {business.website ? <a href={business.website} target="_blank" rel="noreferrer">Website</a> : '-'}
                                     </td>
                                     <td className="px-6 py-4 text-sm text-slate-600">{business.phone_number || '-'}</td>
-                                    <td className="px-6 py-4 text-sm text-slate-600">{business.industry_type || '-'}</td>
                                     <td className="px-6 py-4 text-sm font-semibold capitalize text-slate-700">{business.crawl_tier || 'unknown'}</td>
-                                    <td className="px-6 py-4 text-sm text-slate-600">{business.crawl_score ?? '-'}</td>
+                                    <td className="px-6 py-4 text-sm font-medium text-slate-700">{business.business_role || '-'}</td>
+                                    <td className="px-6 py-4 text-sm font-semibold capitalize text-slate-700">{business.llm_fallback_decision || '-'}</td>
                                     <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{business.crawl_reason || '-'}</td>
+                                    <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{business.llm_fallback_reason || '-'}</td>
+                                    <td className="px-6 py-4 text-sm text-slate-600">{business.industry_type || '-'}</td>
+                                    <td className="px-6 py-4 text-sm text-slate-600">{business.crawl_score ?? '-'}</td>
+                                    <td className="px-6 py-4 text-sm text-slate-600">{business.llm_fallback_status || '-'}</td>
+                                    <td className="px-6 py-4 text-sm text-slate-600">{business.llm_fallback_confidence ?? '-'}</td>
                                     <td className="max-w-sm px-6 py-4 text-sm text-slate-600">{formatEvidence(business.crawl_evidence)}</td>
-                                    <td className="px-6 py-4 text-sm text-slate-600">{business.detected_language || '-'}</td>
                                     <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{formatEvidence(business.positive_concepts)}</td>
                                     <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{formatEvidence(business.negative_concepts)}</td>
-                                    <td className="px-6 py-4 text-sm font-medium text-slate-700">{business.business_role || '-'}</td>
                                     <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{business.business_role_reason || '-'}</td>
-                                    <td className="px-6 py-4 text-sm text-slate-600">{business.llm_fallback_status || '-'}</td>
+                                    <td className="px-6 py-4 text-sm text-slate-600">{business.detected_language || '-'}</td>
                                     <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{business.source_query || '-'}</td>
                                     <td className="px-6 py-4 text-sm text-slate-600">{business.source_query_language || '-'}</td>
                                     <td className="px-6 py-4 text-sm text-slate-600">{business.website_signal || '-'}</td>

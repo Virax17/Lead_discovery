@@ -1,18 +1,27 @@
 from datetime import datetime
 from app.db.connection import get_db
 from app.config.quota import PLACE_DETAILS_MONTHLY_FREE_LIMIT, QUOTA_WARNING_THRESHOLD
+from app.config.settings import settings as app_config
 from app.models.schemas import AppSettings
 from app.services.users import get_current_month_usage, get_user_by_username, get_user_usage_summary, increment_user_usage
 
 def _current_month_str() -> str:
     return datetime.utcnow().strftime("%Y-%m")
 
+# Testing-only hard cap on real Google Places calls, separate from the real
+# monthly quota tracked in Mongo. In-memory only (resets on backend
+# restart) — this is a manual-testing safety valve, not a persisted limit.
+_test_calls_used = 0
+
 async def check_quota_before_call(username: str | None = None) -> str:
+    if app_config.test_max_places_calls > 0 and _test_calls_used >= app_config.test_max_places_calls:
+        return "BLOCKED"
+
     db = get_db()
     year_month = _current_month_str()
     record = await db.api_usage_monthly.find_one({"_id": year_month})
     settings = await db.app_settings.find_one({"_id": "singleton"})
-    
+
     calls = record.get("place_details_calls", 0) if record else 0
     allow_overage = settings.get("allow_paid_overage", False) if settings else False
 
@@ -33,6 +42,10 @@ async def check_quota_before_call(username: str | None = None) -> str:
         return 'OK'
 
 async def increment_usage(username: str | None = None) -> None:
+    if app_config.test_max_places_calls > 0:
+        global _test_calls_used
+        _test_calls_used += 1
+
     db = get_db()
     year_month = _current_month_str()
     await db.api_usage_monthly.update_one(
