@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from urllib.parse import urldefrag, urljoin, urlparse
 
+import httpx
+
 from app.config.crawl_concepts import (
     CONCEPT_PHRASES,
     CONCEPT_WEIGHTS,
@@ -248,6 +250,63 @@ def _build_profile(canonical_url: str | None, pages: list[ProfilePage], status: 
     }
 
 
+async def _httpx_fallback_crawl(root_url: str, root_netloc: str, max_pages: int) -> list[ProfilePage]:
+    """Same fallback role as crawl_scorer._httpx_fallback_crawl -- confirmed
+    live that Crawlee's Rust-based HTTP client (impit) can fail a TLS
+    handshake ("PeerMisbehaved: SelectedUnusableCipherSuiteForVersion")
+    against a real site (hi-force.com) that a plain httpx/system-TLS request
+    to the same URL handles fine, so this must exist here too or those sites
+    are wrongly reported unreachable."""
+    try:
+        from bs4 import BeautifulSoup
+    except Exception:
+        return []
+
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; LeadDiscoveryBot/1.0)"}
+    timeout = httpx.Timeout(10.0, connect=5.0)
+    pages: list[ProfilePage] = []
+    seen: set[str] = set()
+    queue: list[str] = [root_url]
+
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True, headers=headers) as client:
+        while queue and len(pages) < max_pages:
+            url = queue.pop(0)
+            if url in seen:
+                continue
+            seen.add(url)
+            try:
+                response = await client.get(url)
+                response.raise_for_status()
+            except Exception:
+                continue
+
+            content_type = response.headers.get("content-type", "")
+            if "html" not in content_type.lower():
+                continue
+
+            soup = BeautifulSoup(response.text, "lxml")
+            page = _extract_page(soup, str(response.url))
+            if page.text:
+                pages.append(page)
+
+            candidates: list[str] = []
+            for link in soup.find_all("a", href=True):
+                href = link.get("href")
+                if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+                    continue
+                next_url = urldefrag(urljoin(str(response.url), href))[0]
+                parsed = urlparse(next_url)
+                if parsed.scheme not in {"http", "https"} or not _same_site(next_url, root_netloc):
+                    continue
+                if any(next_url.lower().endswith(ext) for ext in (".jpg", ".png", ".gif", ".zip", ".mp4", ".css", ".js", ".pdf")):
+                    continue
+                if next_url not in seen:
+                    candidates.append(next_url)
+            queue.extend(sorted(candidates, key=_profile_link_priority, reverse=True)[: max_pages - len(pages)])
+
+    return pages
+
+
 async def crawl_company_profile(url: str, max_pages: int = MAX_PAGES) -> dict:
     """Best-effort URL -> company-profile crawl. Never raises -- errors are
     reflected in the returned `crawl_status`/`crawl_error` fields."""
@@ -310,6 +369,9 @@ async def crawl_company_profile(url: str, max_pages: int = MAX_PAGES) -> dict:
         await crawler.run([root_url])
     except Exception as exc:
         await log_error(search_id=None, stage="company_profile_crawler", place_id=None, error_message=f"{root_url}: {str(exc)}")
+
+    if not pages:
+        pages = await _httpx_fallback_crawl(root_url, root_netloc, max_pages)
 
     if not pages:
         return _build_profile(root_url, [], status="unreachable", error="Website could not be crawled or returned no usable content.")
