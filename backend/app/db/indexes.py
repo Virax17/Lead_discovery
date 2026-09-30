@@ -55,4 +55,17 @@ async def ensure_indexes():
     # app/services/company_cache.py).
     await db.company_profiles.create_index([("domain", pymongo.ASCENDING)], unique=True)
     await db.company_profiles.create_index([("last_crawled_at", pymongo.ASCENDING)])
+    await db.company_profiles.create_index([("crawl_status", pymongo.ASCENDING)])
+    await db.company_profiles.create_index([("crawl_version", pymongo.ASCENDING)])
+
+    # company_profiles: single-field indexes mirroring master_businesses'
+    # crawl_tier/business_role pattern, plus a compound index on the query an
+    # email-generation engine actually runs -- "good leads to email"
+    # (relevance_tier in best/strong, customer_type not irrelevant) -- so that
+    # filter doesn't fall back to a full collection scan.
+    await db.company_profiles.create_index([("business_role", pymongo.ASCENDING)])
+    await db.company_profiles.create_index([("industry_type", pymongo.ASCENDING)])
+    await db.company_profiles.create_index(
+        [("relevance_tier", pymongo.ASCENDING), ("customer_type", pymongo.ASCENDING)]
+    )
     print("Database indexes ensured.")
