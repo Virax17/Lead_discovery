@@ -37,6 +37,13 @@ class Settings(BaseSettings):
     llm_fallback_max_calls_per_search: int = 50
     llm_fallback_max_calls_per_month: int = 1000
 
+    # URL-to-company-profile enrichment crawler cache (app/services/company_cache.py).
+    # A cached profile from a successful crawl is reused as-is for this many days.
+    company_profile_cache_max_age_days: int = 90
+    # A failed crawl (unreachable/blocked) is retried much sooner, so a
+    # transient failure isn't frozen in for company_profile_cache_max_age_days.
+    company_profile_error_retry_days: int = 7
+
     model_config = SettingsConfigDict(env_file=(".env", "backend/.env"), extra="ignore")
 
 settings = Settings()

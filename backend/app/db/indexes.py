@@ -49,4 +49,10 @@ async def ensure_indexes():
     # queries (e.g. clearing/inspecting a country's cache, staleness sweeps).
     await db.industrial_anchors.create_index([("country_code", pymongo.ASCENDING)])
     await db.industrial_anchors.create_index([("discovered_at", pymongo.ASCENDING)])
+
+    # company_profiles: the URL-to-company-profile enrichment crawler's
+    # dedup/cache store, keyed on normalized domain (see
+    # app/services/company_cache.py).
+    await db.company_profiles.create_index([("domain", pymongo.ASCENDING)], unique=True)
+    await db.company_profiles.create_index([("last_crawled_at", pymongo.ASCENDING)])
     print("Database indexes ensured.")

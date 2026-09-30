@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
-from typing import Optional, List
+from typing import Optional, List, Dict
 from datetime import datetime
 from bson import ObjectId
 
@@ -193,6 +193,50 @@ class PlaceDetails(BaseModel):
     source_query_language: Optional[str] = None
     lat: Optional[float] = None
     lng: Optional[float] = None
+
+class CompanyEnrichRequest(BaseModel):
+    url: str
+
+
+class RecentActivityItem(BaseModel):
+    title: str
+    url: str
+    snippet: Optional[str] = None
+    published_at: Optional[str] = None
+
+
+class CompanyProfile(BaseModel):
+    """A URL-to-company-profile crawl result, cached/deduped by `domain`.
+    Feeds an external email-personalization engine -- see
+    backend/app/services/company_profile_crawler.py and company_cache.py."""
+
+    id: Optional[PyObjectId] = Field(alias="_id", default=None)
+    input_url: str
+    domain: str
+    canonical_url: Optional[str] = None
+    company_name: Optional[str] = None
+    meta_description: Optional[str] = None
+    about_summary: Optional[str] = None
+    matched_domain_concepts: List[str] = Field(default_factory=list)
+    business_role: Optional[str] = None
+    business_role_reason: Optional[str] = None
+    customer_type: Optional[str] = None
+    industry_type: Optional[str] = None
+    relevance_tier: Optional[str] = None
+    contact_emails: List[str] = Field(default_factory=list)
+    contact_phones: List[str] = Field(default_factory=list)
+    social_links: Dict[str, str] = Field(default_factory=dict)
+    detected_language: Optional[str] = None
+    recent_activity: List[RecentActivityItem] = Field(default_factory=list)
+    crawl_status: str
+    crawl_error: Optional[str] = None
+    pages_crawled: int = 0
+    crawl_version: str
+    first_crawled_at: datetime
+    last_crawled_at: datetime
+
+    model_config = ConfigDict(populate_by_name=True, arbitrary_types_allowed=True)
+
 
 class AppSettings(BaseModel):
     id: str = Field(alias="_id", default="singleton")
