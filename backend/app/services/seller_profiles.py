@@ -125,18 +125,19 @@ TRITORC = SellerProfile(
         "TorcUP, Norbar, SPX FLOW Power Team, Wren Hydraulic, Equalizer International"
     ),
     competitor_rule=(
-        '"competitor" if the company manufactures, brands, rents or sells the same tool categories Tritorc sells '
-        "(hydraulic torque wrenches, bolt tensioners, flange management or on-site machining tools). "
-        "Known competitor brands: {brands}. A service contractor that merely USES such tools is NOT a competitor."
+        '"competitor" if the company manufactures or brands the same tool categories Tritorc sells '
+        "(hydraulic torque wrenches, bolt tensioners, flange management or on-site machining tools) under its own name. "
+        "Known competitor brands: {brands}. A service contractor that merely USES such tools, and a distributor, reseller "
+        "or rental house that sells or rents tools made by others, is NOT a competitor."
     ),
     distributor_rule='"distributor" if it resells/distributes industrial tools or equipment made by others.',
     decision_rules=(
         "Judge what the company itself OPERATES or is PAID TO DO, from the source text.\n"
         "  Tritorc makes controlled-bolting tools (hydraulic torque wrenches, bolt tensioners), on-site machining (flange facing, pipe cutting/beveling), tube tools (expanders, cleaners, removal), hydraulic cylinders and pumps, pipe accessories, and runs field services (bolting, retubing, hot tapping, leak sealing, hydro-testing, calibration, rentals). Its real customers: pipeline operators, refineries and petrochemical plants, fertilizer/chemical plants, power and wind operators and their maintenance contractors, steel mills, shutdown/turnaround contractors, and industrial EPC/construction contractors. A good lead OWNS or OPERATES that kind of infrastructure, or is PAID by an owner to build, bolt, machine, test or maintain it.\n"
-        '  "accept" = such an operator; OR an EPC, general/design-build contractor, industrial-service contractor or OEM that builds or maintains industrial, plant, utility, water/wastewater, power or pipeline assets. A diversified contractor that lists many building types is not a restaurant or a shop: if industrial or plant work is a real part of what it does, accept.\n'
-        '  "review" = a distributor or rental house for industrial tools (a possible channel partner: note any competing brands), a company where the relevant work is only incidental, or evidence too thin to judge.\n'
-        '  "reject" = a competitor (makes, brands or rents the same tool categories), or a company with no industrial plant or piping work (retail, offices, software, real estate, hospitality, healthcare, schools, residential trades). Reject needs positive evidence of one of these. A thin, blocked or empty source is NOT a reason to reject: answer "review" and say the evidence was missing.\n'
-        "  Three traps to avoid: (1) Client lists, past-project portfolios and sector lists (restaurants, retail, schools, hotels, roofing) do not describe what the company is; ignore them unless that is its own core work. (2) A company paid to do bolting, machining, testing or turnaround work at other companies' plants is a contractor lead even if it also supplies tools; one whose own product is the tools (makes, brands, rents, resells them) is a competitor or distributor. (3) The automated keyword scorer hint, when shown, is a blunt keyword match: never copy its reject when the text shows real industrial work, and never accept just because it scored high."
+        '  "accept" = such an operator; OR an EPC, general/design-build contractor, industrial-service contractor or OEM that builds or maintains industrial, plant, utility, water/wastewater, power or pipeline assets; OR a distributor, reseller or rental house for industrial tools and equipment (a channel partner: note any competing brands in the reason). A diversified contractor that lists many building types is not a restaurant or a shop: if industrial or plant work is a real part of what it does, accept.\n'
+        '  "review" = a company where the relevant work is only incidental, or evidence too thin to judge.\n'
+        '  "reject" = a competitor (makes or brands the same tool categories as its own products), or a company with no industrial plant or piping work (retail, offices, software, real estate, hospitality, healthcare, schools, residential trades). Reject needs positive evidence of one of these. A thin, blocked or empty source is NOT a reason to reject: answer "review" and say the evidence was missing.\n'
+        "  Three traps to avoid: (1) Client lists, past-project portfolios and sector lists (restaurants, retail, schools, hotels, roofing) do not describe what the company is; ignore them unless that is its own core work. (2) A company paid to do bolting, machining, testing or turnaround work at other companies' plants is a contractor lead even if it also supplies tools; one that makes or brands the tools itself is a competitor, and one that only resells or rents tools made by others is a distributor (accept). (3) The automated keyword scorer hint, when shown, is a blunt keyword match: never copy its reject when the text shows real industrial work, and never accept just because it scored high."
     ),
     catalog=TRITORC_CATALOG,
 )
@@ -187,5 +188,7 @@ def get_profile(profile_id: str | None) -> SellerProfile:
 
 def valid_profile_id(profile_id: str | None) -> str | None:
     """The canonical id, or None if unknown (callers turn that into a 400)."""
-    pid = (profile_id or DEFAULT_PROFILE).lower()
+    if profile_id is not None and not isinstance(profile_id, str):
+        return None
+    pid = (profile_id or DEFAULT_PROFILE).strip().lower()
     return pid if pid in PROFILES else None

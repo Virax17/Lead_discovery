@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 
 from bson import ObjectId
 from bson.errors import InvalidId
+from pymongo.errors import DuplicateKeyError
 
 from app.config.settings import settings
 from app.db.connection import get_db
@@ -47,14 +48,18 @@ _LEGAL_SUFFIXES = re.compile(
 
 def name_key(name: str | None) -> str | None:
     """Normalized company name used for name-based lookups (case/accents/
-    punctuation/legal-suffix insensitive)."""
+    punctuation/legal-suffix insensitive). Names in non-Latin scripts keep their own
+    (case-folded) letters, so they still get a key instead of silently losing it."""
     if not name:
         return None
     s = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
     s = re.sub(r"[^a-z0-9 ]+", " ", s)
     s = _LEGAL_SUFFIXES.sub(" ", s)
     s = re.sub(r"\s+", " ", s).strip()
-    return s or None
+    if s:
+        return s
+    u = re.sub(r"[\W_]+", " ", unicodedata.normalize("NFKC", name).casefold())
+    return re.sub(r"\s+", " ", u).strip()[:120] or None
 
 
 def _is_fresh(doc: dict) -> bool:
@@ -366,7 +371,26 @@ async def _judge_profile(client, entry: str, cached: dict, profile_id: str) -> d
     return await coll.find_one({"_id": cached["_id"]})
 
 
+_COMPANY_LOCKS: dict[str, list] = {}  # key -> [lock, number of requests using it]
+
+
 async def get_or_enrich(client, entry: str, username: str, force_refresh: bool = False, profile: str = DEFAULT_PROFILE) -> dict:
+    """One request per company at a time: if the same company is requested again while it is being crawled
+    (two tabs, two sellers, a repeated name), the second waits and then finds the saved result instead of crawling again."""
+    entry = entry.strip()
+    key = input_domain(entry) or name_key(entry) or entry.lower()
+    slot = _COMPANY_LOCKS.setdefault(key, [asyncio.Lock(), 0])
+    slot[1] += 1
+    try:
+        async with slot[0]:
+            return await _get_or_enrich(client, entry, username, force_refresh, profile)
+    finally:
+        slot[1] -= 1
+        if slot[1] <= 0:
+            _COMPANY_LOCKS.pop(key, None)
+
+
+async def _get_or_enrich(client, entry: str, username: str, force_refresh: bool = False, profile: str = DEFAULT_PROFILE) -> dict:
     """cache -> (crawl + LLM) -> store, seen as `profile` (the seller we are judging for).
     The crawl is shared by every profile, so judging a known company for a second
     seller costs one LLM call and no crawl. Result carries `cache_hit`."""
@@ -443,7 +467,7 @@ async def _save(entry: str, username: str, data: dict, pages: list, meta: dict, 
         "enriched_at": now,
         "updated_at": now,
     }
-    existing = await coll.find_one({"cache_key": key}, {"profile_ids": 1})
+    existing = await coll.find_one({"cache_key": key}, {"profile_ids": 1, "llm_version": 1, "profiles": 1})
     on_insert = {"created_by": username, "created_at": now, "hit_count": 0, "place_ids": []}
     if is_default:
         fields.update({
@@ -461,17 +485,26 @@ async def _save(entry: str, username: str, data: dict, pages: list, meta: dict, 
             "company_category": None, "is_competitor": False, "llm_decision": None,
             "llm_decision_reason": None, "llm_version": None, "tritorc_relevance": [],
         })
-    await coll.update_one(
-        {"cache_key": key},
-        {
-            "$set": fields,
-            "$addToSet": {
-                "input_aliases": entry,
-                "name_keys": {"$each": [k for k in (nkey, entry_key, domain_stem) if k]},
-                "profile_ids": {"$each": _membership_ids(existing, profile_id)},
-            },
-            "$setOnInsert": on_insert,
+    # this crawl replaced the shared facts, so every OTHER seller's earlier verdict was based on the old crawl:
+    # mark it stale and it is re-judged from the new pages (no re-crawl) the next time that company is opened
+    if existing:
+        if not is_default and existing.get("llm_version"):
+            fields["llm_version"] = "stale"
+        for other_id, slot_doc in (existing.get("profiles") or {}).items():
+            if other_id != profile_id and isinstance(slot_doc, dict) and slot_doc.get("llm_version"):
+                fields[f"profiles.{other_id}.llm_version"] = "stale"
+    update = {
+        "$set": fields,
+        "$addToSet": {
+            "input_aliases": entry,
+            "name_keys": {"$each": [k for k in (nkey, entry_key, domain_stem) if k]},
+            "profile_ids": {"$each": _membership_ids(existing, profile_id)},
         },
-        upsert=True,
-    )
+        "$setOnInsert": on_insert,
+    }
+    try:
+        await coll.update_one({"cache_key": key}, update, upsert=True)
+    except DuplicateKeyError:
+        # another request inserted the same company between our read and write: the document exists now, so just update it
+        await coll.update_one({"cache_key": key}, update, upsert=True)
     return serialize(await coll.find_one({"cache_key": key}))

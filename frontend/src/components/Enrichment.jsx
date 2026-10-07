@@ -26,9 +26,12 @@ export default function Enrichment() {
     const stopJudgingRef = useRef(false);
     const profileName = profiles.find((p) => p.id === profile)?.name || 'Tritorc';
 
+    const storedSeq = useRef(0);
     const loadStored = async (q = query, p = profile) => {
+        const seq = ++storedSeq.current;
         try {
-            setStored(await fetchEnrichments({ q, profile: p }));
+            const data = await fetchEnrichments({ q, profile: p });
+            if (seq === storedSeq.current) setStored(data); // a newer request (e.g. seller switched) wins
         } catch (e) {
             setError(e.message);
         }
@@ -60,7 +63,9 @@ export default function Enrichment() {
     // Each seller keeps its own list. These are companies already in the other seller's list but not in this one;
     // adding them reuses each company's saved website crawl, so nothing is crawled again.
     const other = profiles.find((p) => p.id !== profile);
+    const candSeq = useRef(0);
     const loadCandidates = async () => {
+        const seq = ++candSeq.current;
         if (!other) { setCandidates([]); return; }
         try {
             const [mine, theirs] = await Promise.all([
@@ -68,9 +73,9 @@ export default function Enrichment() {
                 fetchEnrichments({ profile: other.id, limit: 200 }),
             ]);
             const have = new Set(mine.items.map((i) => i.id));
-            setCandidates(theirs.items.filter((i) => !have.has(i.id)));
+            if (seq === candSeq.current) setCandidates(theirs.items.filter((i) => !have.has(i.id)));
         } catch {
-            setCandidates([]);
+            if (seq === candSeq.current) setCandidates([]);
         }
     };
     useEffect(() => { loadCandidates(); /* eslint-disable-next-line */ }, [profile, profiles, stored.total]);
@@ -119,8 +124,11 @@ export default function Enrichment() {
         try {
             await streamEnrichment(companies, forceRefresh, (ev) => {
                 if (ev.type === 'error') setError(ev.message);
-                else if (ev.type === 'progress') setProgress({ index: ev.index, total: ev.total, company: ev.company, status: ev.status });
-                else if (ev.type === 'complete') setResults(ev.results);
+                else if (ev.type === 'progress') {
+                    setProgress({ index: ev.index, total: ev.total, company: ev.company, status: ev.status });
+                    // each company shows up as soon as it is done, so Stop or a dropped connection keeps everything finished so far
+                    if (ev.result) setResults((prev) => [...prev, ev.result]);
+                }
             }, controller.signal, profile);
         } catch (err) {
             if (err.name !== 'AbortError') setError(err.message);
@@ -229,7 +237,7 @@ export default function Enrichment() {
                 <summary className="cursor-pointer select-none font-semibold text-slate-800">How to read the results</summary>
                 <dl className="mt-3 grid gap-x-8 gap-y-2 sm:grid-cols-2">
                     <div><dt className="font-semibold text-slate-800">Judge leads for: Tritorc | Ozat</dt><dd>Each seller keeps its own list, decisions, notes, products, buyers and competitors. Only the website crawl is shared, so a company is never crawled twice. A company appears in a seller's list once you enrich it for that seller.</dd></div>
-                    <div><dt className="font-semibold text-slate-800">LLM decision</dt><dd>The AI's call on whether Tritorc should pursue the company: <b className="text-emerald-700">Accept</b> (green row), <b className="text-yellow-700">Review</b> (light yellow row: needs a human look, also used when a website couldn't be read), <b className="text-rose-700">Reject</b> (red row). A <b className="text-orange-700">light orange row</b> means only the keyword check has seen it and scored it Weak. "Not judged" (white row) means only the keyword check has seen it; enrich it again to get the AI's call.</dd></div>
+                    <div><dt className="font-semibold text-slate-800">LLM decision</dt><dd>The AI's call on whether Tritorc should pursue the company: <b className="text-emerald-700">Accept</b> (green row: includes distributors and resellers, who are channel partners), <b className="text-yellow-700">Review</b> (light yellow row: needs a human look, also used when a website couldn't be read), <b className="text-rose-700">Reject</b> (red row). A <b className="text-orange-700">light orange row</b> means only the keyword check has seen it and scored it Weak. "Not judged" (white row) means only the keyword check has seen it; enrich it again to get the AI's call.</dd></div>
                     <div><dt className="font-semibold text-slate-800">Crawl tier and score</dt><dd>A quick keyword check of the company's website, scored 0 to 100. It can disagree with the AI (it misses real leads when a site lists many project types). When they differ, follow the decision.</dd></div>
                     <div><dt className="font-semibold text-slate-800">Your decision</dt><dd>Open a row and press Accept, Review or Reject to record your own call. It is marked "you", wins over the AI, and is kept when the company is enriched again.</dd></div>
                     <div><dt className="font-semibold text-slate-800">Matched to / Wrong company?</dt><dd>When you type a name, we find its website. If it picked the wrong company, open the row, press "Wrong company?" and paste the right website.</dd></div>

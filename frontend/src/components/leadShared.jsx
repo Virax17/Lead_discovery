@@ -36,7 +36,7 @@ export function llmVerdict(r) {
     if (['accept', 'review', 'reject'].includes(r?.override_decision)) return { key: r.override_decision, derived: false, override: true };
     if (VERDICT_STYLES[r?.llm_decision]) return { key: r.llm_decision, derived: false };
     if (isCompetitor(r)) return { key: 'reject', derived: true };
-    if (r?.business_role === 'supplier_distributor') return { key: 'review', derived: true };
+    if (r?.business_role === 'supplier_distributor') return { key: 'accept', derived: true }; // distributors are channel partners for both sellers
     const tier = r?.crawl_tier;
     if (tier === 'best' || tier === 'strong') return { key: 'accept', derived: true };
     // The keyword scorer alone wrongly rejects real leads (client lists, thin crawls), so a
@@ -138,6 +138,14 @@ export const PRIORITY_COLUMNS = [
     { key: 'recent_projects', label: 'Recent Projects' },
     { key: 'tritorc_relevance', label: 'Tritorc Relevance' },
 ];
+
+/** A list of plain strings, whatever shape the stored value has (old records may hold a string or objects). */
+export const asList = (v) => (Array.isArray(v) ? v : v ? [v] : [])
+    .map((x) => (typeof x === 'string' ? x : x == null ? '' : typeof x === 'object' ? Object.values(x).filter((y) => typeof y === 'string').join(' ') : String(x)))
+    .filter(Boolean);
+
+/** Only http(s) links are clickable; anything else (javascript:, relative junk) becomes undefined. */
+export const safeHref = (u) => (typeof u === 'string' && /^https?:\/\//i.test(u.trim()) ? u.trim() : undefined);
 
 export function listText(value, max = 220) {
     if (!value || value.length === 0) return '-';

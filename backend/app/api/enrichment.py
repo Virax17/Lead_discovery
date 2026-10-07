@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 import logging
@@ -10,6 +11,8 @@ from fastapi.responses import StreamingResponse
 from app.api.auth import get_current_user
 from app.db.connection import get_db
 from app.services.enrichment_engine import (
+    clean_company_line,
+    clean_company_list,
     classify_error,
     get_groq_client,
     is_public_url,
@@ -39,6 +42,24 @@ def _profile_of(value) -> str:
     if not pid:
         raise HTTPException(status_code=400, detail="Unknown seller. Choose one of: " + ", ".join(PROFILES))
     return pid
+
+
+async def _json_body(request: Request) -> dict:
+    """The request's JSON object, or a clear 400 (never a 500 for malformed input)."""
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="That request wasn't valid JSON.")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="That request wasn't a JSON object.")
+    return body
+
+
+def _safe_cell(value):
+    """Spreadsheet programs run text that starts with = + - @ as a formula; crawled and AI-written text must never do that."""
+    if isinstance(value, str) and value[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + value
+    return value
 
 
 @router.get("/profiles")
@@ -105,10 +126,14 @@ async def enrich(request: Request, current_user: str = Depends(get_current_user)
     """Server-Sent Events stream: start -> (progress, result)* -> complete.
     Known companies are served from `company_enrichments` without crawling or
     calling the LLM unless `force_refresh` is true."""
-    body = await request.json()
-    names = [n.strip() for n in body.get("companies", []) if isinstance(n, str) and n.strip()]
-    # preserve order, drop exact duplicates in the same run
-    names = list(dict.fromkeys(names))
+    body = await _json_body(request)
+    companies = body.get("companies", [])
+    if not isinstance(companies, list):
+        raise HTTPException(status_code=400, detail="'companies' must be a list of names.")
+    # clean (control characters, length), then keep order and drop duplicates ignoring case
+    names = clean_company_list(n for n in companies if isinstance(n, str))
+    if not names:
+        raise HTTPException(status_code=400, detail="No company names found. Paste one per line.")
     force_refresh = bool(body.get("force_refresh"))
     profile = _profile_of(body.get("profile"))
     if len(names) > MAX_COMPANIES_PER_RUN:
@@ -127,8 +152,19 @@ async def enrich(request: Request, current_user: str = Depends(get_current_user)
         yield _sse({"type": "start", "total": total})
         for idx, name in enumerate(names, start=1):
             yield _sse({"type": "progress", "index": idx, "total": total, "company": name, "status": "processing"})
+            task = asyncio.ensure_future(get_or_enrich(client, name, current_user, force_refresh=force_refresh, profile=profile))
             try:
-                data = await get_or_enrich(client, name, current_user, force_refresh=force_refresh, profile=profile)
+                while True:
+                    done, _ = await asyncio.wait({task}, timeout=10)
+                    if done:
+                        break
+                    yield ": keepalive
+
+"  # a slow crawl sends nothing for a while; this stops proxies closing the stream
+                data = task.result()
+            except asyncio.CancelledError:
+                task.cancel()  # the user pressed Stop or left the page
+                raise
             except Exception as e:
                 log.exception("enrichment failed for %r", name)
                 code, message = classify_error(e)
@@ -143,9 +179,9 @@ async def enrich(request: Request, current_user: str = Depends(get_current_user)
             results.append(data)
             yield _sse({
                 "type": "progress", "index": idx, "total": total, "company": name,
-                "status": "done", "cache_hit": bool(data.get("cache_hit")),
+                "status": "done", "cache_hit": bool(data.get("cache_hit")), "result": data,
             })
-        yield _sse({"type": "complete", "results": results})
+        yield _sse({"type": "complete", "count": len(results)})  # each result already went out with its "done" event
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -154,8 +190,8 @@ async def enrich(request: Request, current_user: str = Depends(get_current_user)
 async def enrich_single(request: Request, current_user: str = Depends(get_current_user)):
     """Non-streaming enrich of one company (the per-row Enrich button). Served
     from the stored crawl when one exists; links the Places id when given."""
-    body = await request.json()
-    entry = (body.get("website") or body.get("company_name") or "").strip()
+    body = await _json_body(request)
+    entry = clean_company_line(body.get("website") or body.get("company_name") or "")
     profile = _profile_of(body.get("profile"))
     if not entry:
         raise HTTPException(status_code=400, detail="Provide website or company_name.")
@@ -168,17 +204,17 @@ async def enrich_single(request: Request, current_user: str = Depends(get_curren
     except Exception as e:
         log.exception("enrich-single failed for %r", entry)
         raise HTTPException(status_code=502, detail=classify_error(e)[1])
-    if body.get("place_id") and data.get("domain"):
+    if isinstance(body.get("place_id"), str) and body["place_id"] and data.get("domain"):
         await link_place_id(data["domain"], body["place_id"])
-    data["input"] = (body.get("company_name") or entry).strip()
+    data["input"] = clean_company_line(body.get("company_name")) or entry
     return data
 
 
 @router.post("/correct")
 async def correct(request: Request, current_user: str = Depends(get_current_user)):
     """'Wrong company?': the user supplies the right website for a typed name."""
-    body = await request.json()
-    typed = (body.get("input") or "").strip()
+    body = await _json_body(request)
+    typed = clean_company_line(body.get("input"))
     profile = _profile_of(body.get("profile"))
     site = normalize_if_url((body.get("website") or "").strip())
     if not typed:
@@ -203,10 +239,10 @@ async def correct(request: Request, current_user: str = Depends(get_current_user
 @router.post("/override")
 async def override(request: Request, current_user: str = Depends(get_current_user)):
     """Save (or clear) the user's own accept/review/reject call on a stored company."""
-    body = await request.json()
+    body = await _json_body(request)
     decision = body.get("decision")
     profile = _profile_of(body.get("profile"))
-    if decision not in (None, "", "accept", "review", "reject"):
+    if not isinstance(decision, (str, type(None))) or decision not in (None, "", "accept", "review", "reject"):
         raise HTTPException(status_code=400, detail="Decision must be accept, review or reject.")
     doc = await set_override(body.get("id"), decision or None, body.get("note"), current_user, profile=profile)
     if not doc:
@@ -268,8 +304,10 @@ async def lookup(
 
 @router.post("/export-xlsx")
 async def export_xlsx(request: Request, current_user: str = Depends(get_current_user)):
-    body = await request.json()
-    results = body.get("results", [])
+    body = await _json_body(request)
+    results = [r for r in body.get("results", []) if isinstance(r, dict)] if isinstance(body.get("results"), list) else []
+    if not results:
+        raise HTTPException(status_code=400, detail="Nothing to export.")
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -282,9 +320,9 @@ async def export_xlsx(request: Request, current_user: str = Depends(get_current_
         for col in EXPORT_COLUMNS:
             val = _export_value(result, col)
             if col in LIST_COLUMNS:
-                row.append("; ".join(val) if isinstance(val, list) else (val or ""))
+                row.append(_safe_cell("; ".join(str(v) for v in val) if isinstance(val, list) else (val or "")))
             else:
-                row.append(val if val is not None else "")
+                row.append(_safe_cell(val if val is not None else ""))
         ws.append(row)
     for i, w in enumerate(EXPORT_WIDTHS, start=1):
         ws.column_dimensions[openpyxl.utils.get_column_letter(i)].width = w
