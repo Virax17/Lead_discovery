@@ -1,0 +1,16 @@
+# Production compose file. The deploy workflow copies it to /opt/lead-discovery/
+# on the EC2 host, next to the server-only .env (secrets are never in the image).
+services:
+  backend:
+    image: ghcr.io/tritorc-ai1/lead-discovery-backend:${IMAGE_TAG:-latest}
+    # raw: pass .env values through untouched. Without it Compose expands "$..."
+    # inside values and corrupts SHARED_PASSWORD_HASH (a bcrypt hash).
+    env_file:
+      - path: .env
+        format: raw
+    # loopback only: nginx on the host proxies to 8001
+    ports:
+      - "127.0.0.1:8001:8001"
+    volumes:
+      - ./exports:/app/exports
+    restart: unless-stopped
