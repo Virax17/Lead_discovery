@@ -47,27 +47,8 @@ FREE_EMAIL_DOMAINS = {
     "yandex.com", "qq.com", "163.com", "126.com",
 }
 
-_OFFERINGS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config", "tritorc_offerings.json")
-with open(_OFFERINGS_PATH, encoding="utf-8") as f:
-    TRITORC_OFFERINGS = json.load(f)
-
-# category-level summary (not per-product) to keep the grounding payload small
-# enough to stay well under Groq's per-minute token limits across back-to-back calls.
-TRITORC_BLOCK = json.dumps(
-    {
-        "products": [
-            {
-                "name": c["category"],
-                "examples": c.get("example_products", [])[:3],
-                "uses": c.get("applications", [])[:5],
-            }
-            for c in TRITORC_OFFERINGS["product_categories"]
-        ],
-        "services": [s["name"] if isinstance(s, dict) else s for s in TRITORC_OFFERINGS["services"]],
-    },
-    ensure_ascii=False,
-    separators=(",", ":"),
-)
+from app.services.seller_profiles import DEFAULT_PROFILE, TRITORC_OFFERINGS, SellerProfile, get_profile  # noqa: E402,F401
+from app.services.seller_profiles import TRITORC_CATALOG as TRITORC_BLOCK  # noqa: E402,F401
 
 EMPTY_RESULT = {
     "company_name": None, "website": None, "country": None, "hq_city": None, "hq_address": None, "industry": None,
@@ -79,9 +60,68 @@ EMPTY_RESULT = {
 
 
 def get_groq_client():
-    if not settings.groq_api_key:
-        raise RuntimeError("GROQ_API_KEY is not set in backend/.env.")
-    return Groq(api_key=settings.groq_api_key)
+    """The Groq client, or None when only Gemini is configured (enrichment then runs on Gemini alone)."""
+    if settings.groq_api_key:
+        return Groq(api_key=settings.groq_api_key)
+    if settings.gemini_api_key:
+        return None
+    raise RuntimeError("GROQ_API_KEY is not set in backend/.env.")
+
+
+# --- Gemini backup -----------------------------------------------------------------------------
+# Used whenever Groq fails (daily token limit, rate limit, outage, key problem). Same model the
+# Lead Discovery LLM fallback uses (services/llm_fallback.py).
+GEMINI_MODEL = "gemini-3.5-flash-lite"
+GEMINI_TEXT_BUDGET = 16000  # Gemini has no 8k tokens-per-minute cap, so it can read more of the site
+_JSON_SYSTEM = "You return only valid JSON. Never wrap it in markdown code fences."
+_gemini_client = None
+
+
+def _get_gemini_client():
+    global _gemini_client
+    if not settings.gemini_api_key:
+        return None
+    if _gemini_client is None:
+        from google import genai
+
+        _gemini_client = genai.Client(api_key=settings.gemini_api_key)
+    return _gemini_client
+
+
+def call_gemini_json(prompt: str, system: str = _JSON_SYSTEM) -> str:
+    """One synchronous Gemini call that returns JSON text. Raises if Gemini is not configured or fails."""
+    client = _get_gemini_client()
+    if client is None:
+        raise RuntimeError("GEMINI_API_KEY is not set.")
+    interaction = client.interactions.create(
+        model=GEMINI_MODEL,
+        system_instruction=system,
+        input=prompt,
+        response_format={"type": "text", "mime_type": "application/json"},
+    )
+    return interaction.output_text
+
+
+def llm_json_text(client, prompt: str, *, system: str = _JSON_SYSTEM, max_tokens: int = 1200) -> tuple[str, str]:
+    """(JSON text, provider) for a one-shot prompt: Groq first, Gemini if Groq is missing or fails."""
+    groq_error: Exception | None = None
+    if client is not None:
+        try:
+            completion = client.chat.completions.create(
+                model=settings.groq_model,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+                reasoning_effort="low",
+            )
+            return completion.choices[0].message.content, "groq"
+        except Exception as e:  # noqa: BLE001 - any Groq failure should fall through to Gemini
+            groq_error = e
+    try:
+        return call_gemini_json(prompt, system), "gemini"
+    except Exception as ge:  # noqa: BLE001
+        raise (groq_error or ge)
 
 
 class UnsafeURLError(Exception):
@@ -206,23 +246,14 @@ def find_official_site(client, company_name: str):
             return str(r.url).rstrip("/")
 
     try:
-        completion = client.chat.completions.create(
-            model=settings.groq_model,
-            messages=[
-                {"role": "system", "content": "You return only valid JSON."},
-                {"role": "user", "content": (
-                    f'What is the primary official corporate website domain for the company "{company_name}"? '
-                    'Respond with a JSON object: {"domain": "example.com"} using only the bare domain '
-                    '(no scheme, no path). If you are not confident you know the real domain, '
-                    'respond with {"domain": null}.'
-                )},
-            ],
-            temperature=0,
+        raw, _provider = llm_json_text(
+            client,
+            f'What is the primary official corporate website domain for the company "{company_name}"? '
+            'Respond with a JSON object: {"domain": "example.com"} using only the bare domain '
+            '(no scheme, no path). If you are not confident you know the real domain, '
+            'respond with {"domain": null}.',
             max_tokens=300,
-            response_format={"type": "json_object"},
-            reasoning_effort="low",
         )
-        raw = completion.choices[0].message.content
         data = json.loads(raw)
         domain = data.get("domain")
         if not domain:
@@ -396,7 +427,7 @@ def crawl_company_site(base_url: str, max_pages: int = MAX_PAGES, timeout: int =
     return pages_text, None, contacts
 
 
-ENRICHMENT_SCHEMA_HINT = """{
+_SCHEMA_TEMPLATE = """{
   "company_name": "",
   "website": "",
   "country": "",
@@ -417,6 +448,10 @@ ENRICHMENT_SCHEMA_HINT = """{
   "tritorc_relevance": []
 }"""
 
+
+def schema_hint(profile: SellerProfile) -> str:
+    return _SCHEMA_TEMPLATE.replace('"tritorc_relevance"', f'"{profile.fit_key}"')
+
 # A/B/C size class by annual turnover (US$ equivalent). Change here to re-band; bump
 # ENRICHMENT_LLM_VERSION in enrichment_store.py so stored companies are re-judged.
 TURNOVER_BANDS = (
@@ -424,10 +459,6 @@ TURNOVER_BANDS = (
     "B = US$10 million to under US$100 million (mid-size), C = under US$10 million (small)."
 )
 
-COMPETITOR_BRANDS = (
-    "HYTORC, Enerpac, Hydratight, Atlas Copco, Hi-Force, RAD Torque, ITH, Riverhawk, "
-    "TorcUP, Norbar, SPX FLOW Power Team, Wren Hydraulic, Equalizer International"
-)
 
 def scorer_hint_block(fit: dict | None) -> str:
     """The rule-based scorer's verdict, shown to the model as a hint only
@@ -443,7 +474,8 @@ def scorer_hint_block(fit: dict | None) -> str:
     )
 
 
-def build_prompt(company_name, website, crawled_pages, no_site_found, extra_note=None, text_budget=None, scorer_hint=None):
+def build_prompt(company_name, website, crawled_pages, no_site_found, extra_note=None, text_budget=None, scorer_hint=None, profile=None):
+    profile = profile or get_profile(None)
     text_budget = text_budget or PROMPT_TEXT_BUDGET
     if no_site_found:
         source_block = extra_note or (
@@ -460,12 +492,14 @@ def build_prompt(company_name, website, crawled_pages, no_site_found, extra_note
         )
         source_block = f"WEBSITE CONTENT (scraped just now):\n{joined}"
 
-    return f"""You are a B2B sales-intelligence analyst for Tritorc, a maker of hydraulic torque wrenches, bolt tensioners, flange management and on-site machining tools, and a provider of controlled-bolting and related field services. Profile the company "{company_name}" so Tritorc's sales team can decide whether it is a customer, a channel partner, or a competitor. Use ONLY the source material given below (website text if provided). Never invent facts; if something is unknown, use null or an empty list.
+    intro = profile.intro.replace("{company_name}", company_name)
+    category_1 = profile.competitor_rule.replace("{brands}", profile.competitor_brands)
+    return f"""{intro} Use ONLY the source material given below (website text if provided). Never invent facts; if something is unknown, use null or an empty list.
 
 {source_block}
 {scorer_hint_block(scorer_hint)}
 TASK: Return a single JSON object with EXACTLY this shape (no extra keys, no markdown fences, no commentary):
-{ENRICHMENT_SCHEMA_HINT}
+{schema_hint(profile)}
 
 Field rules:
 - "company_name": the company's proper name.
@@ -475,8 +509,8 @@ Field rules:
 - "hq_address": the headquarters street address exactly as written in the source, including postal/zip code when present, or null.
 - "industry": the company's primary industry, as specific as the source allows (e.g. "LNG Terminal Operations" rather than "Energy"). Typical values: "Oil & Gas", "Refining", "Petrochemical", "Power Generation", "Nuclear", "Wind Energy", "Steel Manufacturing", "Cement", "Pulp & Paper", "Mining", "Shipbuilding", "Water/Wastewater", "Aerospace", "Construction", "Industrial Maintenance".
 - "company_category": MUST be exactly one of "competitor", "distributor", "ECP", "end_user". Decide in this order:
-  1. "competitor" if the company manufactures, brands, rents or sells the same tool categories Tritorc sells (hydraulic torque wrenches, bolt tensioners, flange management or on-site machining tools). Known competitor brands: {COMPETITOR_BRANDS}. A service contractor that merely USES such tools is NOT a competitor.
-  2. "distributor" if it resells/distributes industrial tools or equipment made by others.
+  1. {category_1}
+  2. {profile.distributor_rule}
   3. "ECP" if it is an engineering/construction/procurement contractor or field-service contractor delivering projects for others.
   4. "end_user" for every other private company or government/public-sector organization that would use industrial tools/services in its own operations.
 - "is_competitor": true when "company_category" is "competitor", otherwise false.
@@ -484,20 +518,15 @@ Field rules:
 - "annual_turnover": the company's annual revenue/turnover exactly as the source states it (e.g. "US$12 billion", "INR 450 crore"), or null if the source does not state one.
 - "turnover_class": the company's size by annual turnover, exactly one of "A", "B", "C", or null. {TURNOVER_BANDS} Decide in this order: (1) if "annual_turnover" is stated, convert it to US dollars and use the bands; (2) else if the source states headcount, estimate: 1,000 or more employees -> "A", 100 to 999 -> "B", under 100 -> "C"; (3) else if it is clearly a large listed or multinational group you know well, "A"; (4) otherwise null. Never guess a class for a small or unknown company.
 - "turnover_basis": how "turnover_class" was decided, exactly one of "stated" (rule 1), "estimated from headcount" (rule 2), "well-known company" (rule 3), or null when "turnover_class" is null.
-- "llm_decision": your sales verdict on whether Tritorc should pursue this company, exactly one of "accept", "review", "reject". Judge what the company itself OPERATES or is PAID TO DO, from the source text.
-  Tritorc makes controlled-bolting tools (hydraulic torque wrenches, bolt tensioners), on-site machining (flange facing, pipe cutting/beveling), tube tools (expanders, cleaners, removal), hydraulic cylinders and pumps, pipe accessories, and runs field services (bolting, retubing, hot tapping, leak sealing, hydro-testing, calibration, rentals). Its real customers: pipeline operators, refineries and petrochemical plants, fertilizer/chemical plants, power and wind operators and their maintenance contractors, steel mills, shutdown/turnaround contractors, and industrial EPC/construction contractors. A good lead OWNS or OPERATES that kind of infrastructure, or is PAID by an owner to build, bolt, machine, test or maintain it.
-  "accept" = such an operator; OR an EPC, general/design-build contractor, industrial-service contractor or OEM that builds or maintains industrial, plant, utility, water/wastewater, power or pipeline assets. A diversified contractor that lists many building types is not a restaurant or a shop: if industrial or plant work is a real part of what it does, accept.
-  "review" = a distributor or rental house for industrial tools (a possible channel partner: note any competing brands), a company where the relevant work is only incidental, or evidence too thin to judge.
-  "reject" = a competitor (makes, brands or rents the same tool categories), or a company with no industrial plant or piping work (retail, offices, software, real estate, hospitality, healthcare, schools, residential trades). Reject needs positive evidence of one of these. A thin, blocked or empty source is NOT a reason to reject: answer "review" and say the evidence was missing.
-  Three traps to avoid: (1) Client lists, past-project portfolios and sector lists (restaurants, retail, schools, hotels, roofing) do not describe what the company is; ignore them unless that is its own core work. (2) A company paid to do bolting, machining, testing or turnaround work at other companies' plants is a contractor lead even if it also supplies tools; one whose own product is the tools (makes, brands, rents, resells them) is a competitor or distributor. (3) The automated keyword scorer hint, when shown, is a blunt keyword match: never copy its reject when the text shows real industrial work, and never accept just because it scored high.
+- "llm_decision": your sales verdict on whether {profile.name} should pursue this company, exactly one of "accept", "review", "reject". {profile.decision_rules}
 - "llm_decision_reason": one short plain sentence naming the evidence behind "llm_decision".
 - "business_description": 2-4 factual sentences describing what the company does, grounded in the source text.
 - "key_operations": up to 8 concrete operational activities/business lines taken from the source. Prefer specific ones ("turbine maintenance", "pipeline construction") over generic ones ("consulting", "engineering").
 - "projects_or_recent_activity": at most 5 of the most notable or recent named projects, plants, contracts, expansions or news items from the source. Each as "Project/contract (client if named, scope or value if stated) (year)". Newest first. Empty list if none.
-- "tritorc_relevance": list of short strings, each naming a SPECIFIC Tritorc product category, example product, or service from the catalog below AND why it's relevant to this company's operations (e.g. "Hydraulic Torque Wrenches (e.g. TSL Series) — relevant for flange bolting during the refinery turnarounds mentioned on their site"). Only reference items that actually appear in the catalog below. If nothing in the source material suggests a real need, return an empty list rather than forcing a match.
+- "{profile.fit_key}": list of short strings, each naming a SPECIFIC {profile.name} product category, example product, or service from the catalog below AND why it's relevant to this company's operations (e.g. "{profile.fit_example}"). Only reference items that actually appear in the catalog below. If nothing in the source material suggests a real need, return an empty list rather than forcing a match.
 
-TRITORC PRODUCT & SERVICE CATALOG (only reference items from this list in tritorc_relevance):
-{TRITORC_BLOCK}
+{profile.name.upper()} PRODUCT & SERVICE CATALOG (only reference items from this list in {profile.fit_key}):
+{profile.catalog}
 
 Return ONLY the JSON object."""
 
@@ -534,6 +563,8 @@ def call_groq_with_retry(client, prompt: str, max_retries: int = 4):
         except APIStatusError as e:
             last_err = e
             if e.status_code == 429:
+                if "per day" in str(e) or "(TPD)" in str(e) or settings.gemini_api_key:
+                    raise  # daily limit, or Gemini is ready as a backup: don't sleep, fall back now
                 wait_s = 5.0
                 try:
                     body = e.response.json()
@@ -668,7 +699,16 @@ def score_pages(name: str | None, website: str | None, pages: list) -> dict:
     }
 
 
-def enrich_company(client, company_input: str, pages: list | None = None, website: str | None = None):
+def score_for_profile(profile_id: str, name: str | None, website: str | None, pages: list) -> dict:
+    """The rule-based keyword scorer that belongs to a seller profile."""
+    if profile_id == "ozat":
+        from app.services.ozat_scorer import score_ozat
+
+        return score_ozat(name, website, pages)
+    return score_pages(name, website, pages)
+
+
+def enrich_company(client, company_input: str, pages: list | None = None, website: str | None = None, profile_id: str = DEFAULT_PROFILE):
     """Resolve -> crawl -> Groq extraction for one input line.
 
     If `pages`/`website` are supplied (cache reuse), the crawl is skipped and
@@ -718,17 +758,32 @@ def enrich_company(client, company_input: str, pages: list | None = None, websit
         if is_free_email else None
     )
 
-    scorer_hint = score_pages(display_name, website, pages) if pages else None
-    completion = None
-    for budget in PROMPT_TEXT_BUDGET_STEPS:
-        prompt = build_prompt(display_name, website, pages, no_site_found, extra_note=extra_note, text_budget=budget, scorer_hint=scorer_hint)
+    profile = get_profile(profile_id)
+    scorer_hint = score_for_profile(profile.id, display_name, website, pages) if pages else None
+    raw, provider, groq_error = None, "groq", None
+    if client is not None:
+        for budget in PROMPT_TEXT_BUDGET_STEPS:
+            prompt = build_prompt(display_name, website, pages, no_site_found, extra_note=extra_note, text_budget=budget, scorer_hint=scorer_hint, profile=profile)
+            try:
+                completion = call_groq_with_retry(client, prompt)
+                raw = completion.choices[0].message.content
+                break
+            except APIStatusError as e:
+                groq_error = e
+                if e.status_code != 413 or budget == PROMPT_TEXT_BUDGET_STEPS[-1]:
+                    break  # a different failure, or even the shortest prompt was too big
+            except Exception as e:  # noqa: BLE001 - connection errors, timeouts
+                groq_error = e
+                break
+    if raw is None:
+        if not settings.gemini_api_key:
+            raise groq_error or RuntimeError("GROQ_API_KEY is not set in backend/.env.")
         try:
-            completion = call_groq_with_retry(client, prompt)
-            break
-        except APIStatusError as e:
-            if e.status_code != 413 or budget == PROMPT_TEXT_BUDGET_STEPS[-1]:
-                raise
-    raw = completion.choices[0].message.content
+            prompt = build_prompt(display_name, website, pages, no_site_found, extra_note=extra_note, text_budget=GEMINI_TEXT_BUDGET, scorer_hint=scorer_hint, profile=profile)
+            raw = call_gemini_json(prompt)
+            provider = "gemini"
+        except Exception as ge:  # noqa: BLE001
+            raise groq_error or ge
     try:
         data = json.loads(raw)
     except json.JSONDecodeError:
@@ -738,14 +793,22 @@ def enrich_company(client, company_input: str, pages: list | None = None, websit
     data.setdefault("company_name", display_name)
     if not data.get("website"):
         data["website"] = website
-    fit = score_pages(data.get("company_name") or display_name, data.get("website") or website, pages)
+    name_for_score = data.get("company_name") or display_name
+    site_for_score = data.get("website") or website
+    fit = score_for_profile(profile.id, name_for_score, site_for_score, pages)
     meta = {
         "crawl_status": "ok" if pages else "no_content",
         "crawl_error": None if pages else err,
         "contacts": contacts,
         "fit": fit,
+        "llm_provider": provider,
+        "llm_model": GEMINI_MODEL if provider == "gemini" else settings.groq_model,
     }
-    reconcile_competitor(data, fit, has_source=bool(pages))
+    if profile.id != DEFAULT_PROFILE:
+        # the company-level crawl_* fields always come from the Tritorc scorer; the other
+        # seller's score is kept in its own profile slot (see enrichment_store)
+        meta["fit_default"] = score_pages(name_for_score, site_for_score, pages)
+    reconcile_competitor(data, fit, has_source=bool(pages), profile=profile)
     return data, pages, meta
 
 
@@ -777,6 +840,16 @@ def classify_error(exc: Exception) -> tuple[str, str]:
         return "not_configured", "The AI service isn't set up on the server. Ask an admin to add the API key."
     if isinstance(exc, APIStatusError):
         if exc.status_code == 429:
+            text = str(exc)
+            m = re.search(r"try again in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?", text)
+            minutes = None
+            if m and any(m.groups()):
+                minutes = int(m.group(1) or 0) * 60 + int(m.group(2) or 0) + (1 if float(m.group(3) or 0) > 0 else 0)
+            if "per day" in text or "(TPD)" in text:
+                when = f"about {minutes} minute{'s' if minutes != 1 else ''}" if minutes else "a while"
+                return "daily_limit", f"The AI service's daily limit is used up. It frees up again in {when}; press Retry then."
+            if minutes and minutes > 1:
+                return "rate_limited", f"The AI service is busy. Wait about {minutes} minutes, then press Retry."
             return "rate_limited", "The AI service is busy right now. Wait a minute, then press Retry."
         if exc.status_code == 413:
             return "too_large", "This company's pages were too long for the AI to read. Press Retry."
@@ -789,14 +862,17 @@ def classify_error(exc: Exception) -> tuple[str, str]:
     return "unknown", "Something went wrong with this company. Press Retry; if it keeps happening, tell an admin."
 
 
-def reconcile_competitor(data: dict, fit: dict | None, has_source: bool = True) -> None:
+def reconcile_competitor(data: dict, fit: dict | None, has_source: bool = True, profile: SellerProfile | None = None) -> None:
     """Keep company_category / is_competitor consistent and let either the LLM
     or the rule-based scorer mark a competitor (HYTORC, Enerpac, ...)."""
+    profile = profile or get_profile(None)
+    data["fit_products"] = data.get(profile.fit_key) or []
     cat = data.get("company_category")
     if cat not in VALID_CATEGORIES:
         cat = {"ecp": "ECP", "end user": "end_user", "enduser": "end_user"}.get(str(cat or "").strip().lower(), cat if cat in VALID_CATEGORIES else None)
     scorer_says = (fit or {}).get("business_role") == "competitor_manufacturer"
-    own = "tritorc" in f"{data.get('website') or ''} {data.get('company_name') or ''}".lower()
+    own_text = f"{data.get('website') or ''} {data.get('company_name') or ''}".lower()
+    own = any(t in own_text for t in profile.own_tokens)
     if own:
         data["is_competitor"] = False
         cat = None if cat == "competitor" else cat
@@ -812,7 +888,7 @@ def reconcile_competitor(data: dict, fit: dict | None, has_source: bool = True) 
     if data["is_competitor"]:
         decision = "reject"
         if not data.get("llm_decision_reason"):
-            data["llm_decision_reason"] = "Competitor: sells the same tool categories as Tritorc."
+            data["llm_decision_reason"] = f"Competitor: sells the same tool categories as {profile.name}."
     if own:
         decision = None
     if not has_source and decision in ("accept", "reject") and not data["is_competitor"]:

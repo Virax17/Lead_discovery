@@ -270,10 +270,10 @@ export async function parseEnrichmentFile(file) {
 
 // Streams Server-Sent Events from POST /enrichment/enrich (EventSource can't
 // POST or send an Authorization header, so this reads the fetch body).
-export async function streamEnrichment(companies, forceRefresh, onEvent, signal) {
+export async function streamEnrichment(companies, forceRefresh, onEvent, signal, profile = "tritorc") {
     const res = await authorizedFetch(`${API_BASE}/enrichment/enrich`, {
         method: "POST",
-        body: JSON.stringify({ companies, force_refresh: forceRefresh }),
+        body: JSON.stringify({ companies, force_refresh: forceRefresh, profile }),
         signal,
     });
     if (!res.ok) {
@@ -296,10 +296,10 @@ export async function streamEnrichment(companies, forceRefresh, onEvent, signal)
     }
 }
 
-export async function enrichSingle({ companyName, website, placeId }) {
+export async function enrichSingle({ companyName, website, placeId, profile = "tritorc" }) {
     const res = await authorizedFetch(`${API_BASE}/enrichment/enrich-single`, {
         method: "POST",
-        body: JSON.stringify({ company_name: companyName, website, place_id: placeId }),
+        body: JSON.stringify({ company_name: companyName, website, place_id: placeId, profile }),
     });
     const data = await res.json().catch(() => null);
     if (!res.ok) throw new Error(data?.detail || "Enrichment failed");
@@ -314,15 +314,22 @@ async function postEnrichment(path, body, fallback) {
 }
 
 // "Wrong company?": the user gives the right website for a typed name.
-export const correctEnrichment = ({ input, website, wrongId }) =>
-    postEnrichment("correct", { input, website, wrong_id: wrongId }, "Couldn't fix the match. Try again.");
+export const correctEnrichment = ({ input, website, wrongId, profile = "tritorc" }) =>
+    postEnrichment("correct", { input, website, wrong_id: wrongId, profile }, "Couldn't fix the match. Try again.");
 
 // Save the user's own accept/review/reject call (decision null clears it).
-export const setEnrichmentOverride = ({ id, decision, note }) =>
-    postEnrichment("override", { id, decision, note }, "Couldn't save your decision. Try again.");
+export const setEnrichmentOverride = ({ id, decision, note, profile = "tritorc" }) =>
+    postEnrichment("override", { id, decision, note, profile }, "Couldn't save your decision. Try again.");
 
-export async function fetchEnrichments({ q = "", category = "", skip = 0, limit = 50 } = {}) {
-    const params = new URLSearchParams({ skip, limit });
+// The sellers enrichment can judge leads for (drives the Tritorc | Ozat toggle).
+export async function fetchEnrichmentProfiles() {
+    const res = await authorizedFetch(`${API_BASE}/enrichment/profiles`);
+    if (!res.ok) throw new Error("Failed to load sellers");
+    return res.json();
+}
+
+export async function fetchEnrichments({ q = "", category = "", skip = 0, limit = 50, profile = "tritorc" } = {}) {
+    const params = new URLSearchParams({ skip, limit, profile });
     if (q) params.set("q", q);
     if (category) params.set("category", category);
     const res = await authorizedFetch(`${API_BASE}/enrichment?${params}`);

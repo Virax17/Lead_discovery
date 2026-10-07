@@ -31,6 +31,8 @@ const VERDICT_STYLES = {
 
 export function llmVerdict(r) {
     if (isOwnCompany(r)) return null;
+    // another seller's view (e.g. Ozat): nothing to derive from Tritorc's scorer, so until it is judged it is just "not judged"
+    if (r?.profile && r.profile !== 'tritorc' && r.judged_for_profile === false && !['accept', 'review', 'reject'].includes(r?.override_decision)) return { key: 'unjudged', derived: true };
     if (['accept', 'review', 'reject'].includes(r?.override_decision)) return { key: r.override_decision, derived: false, override: true };
     if (VERDICT_STYLES[r?.llm_decision]) return { key: r.llm_decision, derived: false };
     if (isCompetitor(r)) return { key: 'reject', derived: true };
@@ -98,9 +100,10 @@ export function VerdictChip({ r }) {
 }
 
 // Competitor if the rule-based scorer OR the enrichment LLM says so.
-// Tritorc's own record is never a competitor, even though its site matches the
-// competitor keywords (torque wrenches, bolt tensioners...).
-const isOwnCompany = (r) => /tritorc/i.test(`${r?.website || ''} ${r?.domain || ''} ${r?.company_name || r?.name || ''}`);
+// The seller's own record (Tritorc, or Ozat in the Ozat view) is never a competitor, even though its
+// site matches the competitor keywords (torque wrenches, impact sockets...).
+const OWN_COMPANY = { tritorc: /tritorc/i, ozat: /ozat/i };
+const isOwnCompany = (r) => (OWN_COMPANY[r?.profile] || OWN_COMPANY.tritorc).test(`${r?.website || ''} ${r?.domain || ''} ${r?.company_name || r?.name || ''}`);
 
 export const isCompetitor = (r) =>
     !isOwnCompany(r) && (

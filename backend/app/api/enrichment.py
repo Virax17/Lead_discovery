@@ -17,8 +17,11 @@ from app.services.enrichment_engine import (
     parse_companies_file,
 )
 from app.services.export_engine import customer_type_label
+from app.services.seller_profiles import DEFAULT_PROFILE, PROFILES, get_profile, valid_profile_id
 from app.services.enrichment_store import (
     COLLECTION,
+    apply_profile,
+    membership_filter,
     correct_match,
     find_enrichment,
     get_or_enrich,
@@ -28,6 +31,20 @@ from app.services.enrichment_store import (
 
 router = APIRouter(prefix="/enrichment", tags=["enrichment"])
 log = logging.getLogger("enrichment")
+
+
+def _profile_of(value) -> str:
+    """The seller profile a request is for (default Tritorc); 400 if unknown."""
+    pid = valid_profile_id(value)
+    if not pid:
+        raise HTTPException(status_code=400, detail="Unknown seller. Choose one of: " + ", ".join(PROFILES))
+    return pid
+
+
+@router.get("/profiles")
+async def list_profiles(current_user: str = Depends(get_current_user)):
+    """The sellers enrichment can judge leads for (drives the Tritorc | Ozat toggle)."""
+    return {"default": DEFAULT_PROFILE, "profiles": [{"id": p.id, "name": p.name} for p in PROFILES.values()]}
 
 MAX_COMPANIES_PER_RUN = 200
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
@@ -43,7 +60,7 @@ EXPORT_WIDTHS = [14, 22, 26, 36, 18, 12, 11, 14, 24, 20, 20, 12, 20, 40, 50, 12,
 EXPORT_HEADERS = {
     "llm_decision": "LLM Decision", "crawl_score": "Crawl Score", "crawl_tier": "Crawl Tier",
     "override_decision": "Your Decision", "turnover_class": "Turnover Class (A/B/C)",
-    "annual_turnover": "Annual Turnover (as stated)",
+    "annual_turnover": "Annual Turnover (as stated)", "tritorc_relevance": "Why It Fits",
 }
 
 
@@ -93,6 +110,7 @@ async def enrich(request: Request, current_user: str = Depends(get_current_user)
     # preserve order, drop exact duplicates in the same run
     names = list(dict.fromkeys(names))
     force_refresh = bool(body.get("force_refresh"))
+    profile = _profile_of(body.get("profile"))
     if len(names) > MAX_COMPANIES_PER_RUN:
         raise HTTPException(status_code=400, detail=f"Max {MAX_COMPANIES_PER_RUN} companies per run.")
 
@@ -110,7 +128,7 @@ async def enrich(request: Request, current_user: str = Depends(get_current_user)
         for idx, name in enumerate(names, start=1):
             yield _sse({"type": "progress", "index": idx, "total": total, "company": name, "status": "processing"})
             try:
-                data = await get_or_enrich(client, name, current_user, force_refresh=force_refresh)
+                data = await get_or_enrich(client, name, current_user, force_refresh=force_refresh, profile=profile)
             except Exception as e:
                 log.exception("enrichment failed for %r", name)
                 code, message = classify_error(e)
@@ -119,6 +137,7 @@ async def enrich(request: Request, current_user: str = Depends(get_current_user)
                     "company_category": None, "business_description": None,
                     "key_operations": [], "projects_or_recent_activity": [], "tritorc_relevance": [],
                     "cache_hit": False, "error": True, "error_code": code, "error_message": message,
+                    "profile": profile, "profile_name": get_profile(profile).name,
                 }
             data["input"] = name
             results.append(data)
@@ -137,6 +156,7 @@ async def enrich_single(request: Request, current_user: str = Depends(get_curren
     from the stored crawl when one exists; links the Places id when given."""
     body = await request.json()
     entry = (body.get("website") or body.get("company_name") or "").strip()
+    profile = _profile_of(body.get("profile"))
     if not entry:
         raise HTTPException(status_code=400, detail="Provide website or company_name.")
     try:
@@ -144,7 +164,7 @@ async def enrich_single(request: Request, current_user: str = Depends(get_curren
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=classify_error(e)[1])
     try:
-        data = await get_or_enrich(client, entry, current_user, force_refresh=bool(body.get("force_refresh")))
+        data = await get_or_enrich(client, entry, current_user, force_refresh=bool(body.get("force_refresh")), profile=profile)
     except Exception as e:
         log.exception("enrich-single failed for %r", entry)
         raise HTTPException(status_code=502, detail=classify_error(e)[1])
@@ -159,6 +179,7 @@ async def correct(request: Request, current_user: str = Depends(get_current_user
     """'Wrong company?': the user supplies the right website for a typed name."""
     body = await request.json()
     typed = (body.get("input") or "").strip()
+    profile = _profile_of(body.get("profile"))
     site = normalize_if_url((body.get("website") or "").strip())
     if not typed:
         raise HTTPException(status_code=400, detail="Missing the original company name.")
@@ -171,7 +192,7 @@ async def correct(request: Request, current_user: str = Depends(get_current_user
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=classify_error(e)[1])
     try:
-        data = await correct_match(client, typed, site, body.get("wrong_id"), current_user)
+        data = await correct_match(client, typed, site, body.get("wrong_id"), current_user, profile=profile)
     except Exception as e:
         log.exception("correct failed for %r -> %r", typed, site)
         raise HTTPException(status_code=502, detail=classify_error(e)[1])
@@ -184,9 +205,10 @@ async def override(request: Request, current_user: str = Depends(get_current_use
     """Save (or clear) the user's own accept/review/reject call on a stored company."""
     body = await request.json()
     decision = body.get("decision")
+    profile = _profile_of(body.get("profile"))
     if decision not in (None, "", "accept", "review", "reject"):
         raise HTTPException(status_code=400, detail="Decision must be accept, review or reject.")
-    doc = await set_override(body.get("id"), decision or None, body.get("note"), current_user)
+    doc = await set_override(body.get("id"), decision or None, body.get("note"), current_user, profile=profile)
     if not doc:
         raise HTTPException(status_code=404, detail="That company is no longer stored. Enrich it again first.")
     return doc
@@ -198,16 +220,18 @@ async def list_enrichments(
     category: str | None = None,
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
+    profile: str | None = None,
     current_user: str = Depends(get_current_user),
 ):
-    """Stored enrichments, newest first (crawled page text omitted)."""
-    flt: dict = {}
+    """Stored enrichments, newest first (crawled page text omitted), seen as `profile`."""
+    profile = _profile_of(profile)
+    conds: list[dict] = [membership_filter(profile)]  # each seller's list holds only companies enriched for them
     if category:
-        flt["company_category"] = category
+        conds.append({"company_category" if profile == DEFAULT_PROFILE else f"profiles.{profile}.company_category": category})
     if q:
-
         rx = {"$regex": re.escape(q), "$options": "i"}
-        flt["$or"] = [{"company_name": rx}, {"domain": rx}, {"industry": rx}, {"country": rx}]
+        conds.append({"$or": [{"company_name": rx}, {"domain": rx}, {"industry": rx}, {"country": rx}]})
+    flt: dict = {"$and": conds}
     coll = get_db()[COLLECTION]
     total = await coll.count_documents(flt)
     pipeline = [
@@ -221,7 +245,7 @@ async def list_enrichments(
     items = []
     async for doc in coll.aggregate(pipeline):
         doc["id"] = str(doc.pop("_id"))
-        items.append(doc)
+        items.append(apply_profile(doc, profile))
     return {"total": total, "items": items}
 
 
