@@ -1,6 +1,6 @@
 import React, { Suspense, lazy } from 'react';
 import { BrowserRouter, Routes, Route, Navigate, Link, useNavigate } from 'react-router-dom';
-import { LogOut, Search as SearchIcon, Clock, Database, Shield } from 'lucide-react';
+import { LogOut, Search as SearchIcon, Clock, Database, Shield, Sparkles } from 'lucide-react';
 import { I18nProvider, useI18n } from './i18n/I18nContext';
 import { ShellProvider, useShell } from './context/ShellContext';
 
@@ -10,6 +10,7 @@ const Progress = lazy(() => import('./components/Progress'));
 const Results = lazy(() => import('./components/Results'));
 const History = lazy(() => import('./components/History'));
 const MasterDatabase = lazy(() => import('./components/MasterDatabase'));
+const Enrichment = lazy(() => import('./components/Enrichment'));
 const Admin = lazy(() => import('./components/Admin'));
 
 function RouteFallback() {
@@ -52,6 +53,7 @@ function LayoutFrame({ children }) {
                             <NavLink to="/" icon={SearchIcon}>{t('app.nav.newSearch')}</NavLink>
                             <NavLink to="/history" icon={Clock}>{t('app.nav.history')}</NavLink>
                             <NavLink to="/database" icon={Database}>{t('app.nav.masterDatabase')}</NavLink>
+                            <NavLink to="/enrichment" icon={Sparkles}>Enrichment</NavLink>
                             {currentUser?.role === 'admin' && (
                                 <NavLink to="/admin" icon={Shield}>{t('app.nav.admin')}</NavLink>
                             )}
@@ -100,6 +102,7 @@ function LayoutFrame({ children }) {
                     <NavLink to="/" icon={SearchIcon}>{t('app.nav.newSearch')}</NavLink>
                     <NavLink to="/history" icon={Clock}>{t('app.nav.history')}</NavLink>
                     <NavLink to="/database" icon={Database}>{t('app.nav.masterDatabase')}</NavLink>
+                    <NavLink to="/enrichment" icon={Sparkles}>Enrichment</NavLink>
                     {currentUser?.role === 'admin' && (
                         <NavLink to="/admin" icon={Shield}>{t('app.nav.admin')}</NavLink>
                     )}
@@ -138,6 +141,7 @@ function AppRoutes() {
                 <Route path="/search/:id/results" element={<ProtectedLayout><Results /></ProtectedLayout>} />
                 <Route path="/history" element={<ProtectedLayout><History /></ProtectedLayout>} />
                 <Route path="/database" element={<ProtectedLayout><MasterDatabase /></ProtectedLayout>} />
+                <Route path="/enrichment" element={<ProtectedLayout><Enrichment /></ProtectedLayout>} />
                 <Route path="/admin" element={<ProtectedLayout><Admin /></ProtectedLayout>} />
                 <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>

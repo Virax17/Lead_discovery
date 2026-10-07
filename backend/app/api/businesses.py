@@ -5,7 +5,9 @@ from typing import List, Optional
 from app.api.auth import get_current_user
 from app.config.countries import normalize_country
 from app.db.connection import get_db
+from app.services.company_cache import normalize_domain
 from app.services.country_maintenance import normalize_all_countries
+from app.services.enrichment_store import enrichment_summaries
 from app.services.export_engine import export_country
 from app.services.storage import s3_enabled, local_path, presigned_url
 
@@ -71,10 +73,12 @@ async def list_businesses(
     )
     docs = await cursor.to_list(length=PAGE_SIZE)
 
+    enrichments = await enrichment_summaries(db, docs)
     businesses = []
     for d in docs:
         d["id"] = str(d["_id"])
         del d["_id"]
+        d["enrichment"] = enrichments.get(normalize_domain(d.get("website") or ""))
         businesses.append(d)
 
     return {
