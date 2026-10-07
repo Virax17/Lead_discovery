@@ -9,18 +9,63 @@ from app.services.storage import local_path, upload_if_needed
 
 EXPORT_SOURCE_VALUE = "LeadDiscovery"
 
+# Same labels as the UI's customerTypeLabel(): one customer-type vocabulary
+# derived from the crawler's business_role for both Lead Discovery and Enrichment.
+CUSTOMER_TYPE_LABELS = {
+    "end_user_operator": "End User",
+    "industrial_service_contractor": "Service Contractor",
+    "epc_contractor": "EPC Contractor",
+    "supplier_distributor": "Distributor",
+    "competitor_manufacturer": "Competitor",
+    "generic_local_service": "Not Relevant",
+    "unknown": "Unknown",
+}
+
+
+def customer_type_label(role: Optional[str]) -> str:
+    return CUSTOMER_TYPE_LABELS.get(role or "unknown", "Unknown")
+
+
+def _join_list(value) -> str:
+    return "; ".join(value) if isinstance(value, list) else (value or "")
+
+
+async def _enrichment_cells(db, websites: list) -> dict:
+    """domain -> enrichment summary for the exported businesses (one query)."""
+    from app.services.enrichment_store import enrichment_summaries
+
+    return await enrichment_summaries(db, [{"website": w} for w in websites])
+
+
+def _enrichment_row(enrichments: dict, website: Optional[str], role: Optional[str]) -> dict:
+    from app.services.company_cache import normalize_domain
+
+    e = enrichments.get(normalize_domain(website or "")) or {}
+    own = "tritorc" in (website or "").lower()
+    is_competitor = not own and (role == "competitor_manufacturer" or bool(e.get("is_competitor")))
+    return {
+        "Recent Projects": _join_list(e.get("projects_or_recent_activity")),
+        "Tritorc Relevance": _join_list(e.get("tritorc_relevance")),
+        "Is Competitor": "Yes" if is_competitor else "No",
+    }
+
+
 EXPORT_COLUMNS = [
     "Source",
     "Company Name",
-    "Address",
     "Website",
+    "Address",
     "Phone Number",
-    "Google Maps URL",
-    "Industry Type",
-    "Industry Sector",
-    "Customer Type",
-    "Website Signal",
     "Crawl Tier",
+    "LLM Decision",
+    "Industry Type",
+    "Customer Type",
+    "Recent Projects",
+    "Tritorc Relevance",
+    "Is Competitor",
+    "Google Maps URL",
+    "Industry Sector",
+    "Website Signal",
     "Crawl Score",
     "Crawl Status",
     "Crawl Reason",
@@ -40,7 +85,6 @@ EXPORT_COLUMNS = [
     "Business Role Reason",
     "Translation Status",
     "LLM Fallback Status",
-    "LLM Fallback Decision",
     "LLM Fallback Confidence",
     "LLM Fallback Reason",
     "Source Keyword",
@@ -104,7 +148,7 @@ async def export_search(
                     "Google Maps URL": "$business.maps_url",
                     "Industry Type": "$business.industry_type",
                     "Industry Sector": "$business.industry_sector",
-                    "Customer Type": "$business.customer_type",
+                    "_role": "$business.business_role",
                     "Website Signal": "$business.website_signal",
                     "Crawl Tier": "$business.crawl_tier",
                     "Crawl Score": "$business.crawl_score",
@@ -126,7 +170,7 @@ async def export_search(
                     "Business Role Reason": "$business.business_role_reason",
                     "Translation Status": "$business.translation_status",
                     "LLM Fallback Status": "$business.llm_fallback_status",
-                    "LLM Fallback Decision": "$business.llm_fallback_decision",
+                    "LLM Decision": "$business.llm_fallback_decision",
                     "LLM Fallback Confidence": "$business.llm_fallback_confidence",
                     "LLM Fallback Reason": "$business.llm_fallback_reason",
                     "Source Keyword": "$business.source_keyword",
@@ -140,6 +184,10 @@ async def export_search(
         )
 
         docs = await db.search_results.aggregate(pipeline).to_list(length=None)
+        enrichments = await _enrichment_cells(db, [d.get("Website") for d in docs])
+        for d in docs:
+            d["Customer Type"] = customer_type_label(d.get("_role"))
+            d.update(_enrichment_row(enrichments, d.get("Website"), d.get("_role")))
         df = pd.DataFrame(docs, columns=EXPORT_COLUMNS)
         if "_id" in df.columns:
             df = df.drop(columns=["_id"])
@@ -187,6 +235,7 @@ async def export_country(
         if selected_roles:
             query["business_role"] = {"$in": selected_roles}
         docs = await db.master_businesses.find(query).to_list(length=None)
+        enrichments = await _enrichment_cells(db, [d.get("website") for d in docs])
 
         rows = [
             {
@@ -198,7 +247,8 @@ async def export_country(
                 "Google Maps URL": d.get("maps_url"),
                 "Industry Type": d.get("industry_type"),
                 "Industry Sector": d.get("industry_sector"),
-                "Customer Type": d.get("customer_type"),
+                "Customer Type": customer_type_label(d.get("business_role")),
+                **_enrichment_row(enrichments, d.get("website"), d.get("business_role")),
                 "Website Signal": d.get("website_signal"),
                 "Crawl Tier": d.get("crawl_tier"),
                 "Crawl Score": d.get("crawl_score"),
@@ -220,7 +270,7 @@ async def export_country(
                 "Business Role Reason": d.get("business_role_reason"),
                 "Translation Status": d.get("translation_status"),
                 "LLM Fallback Status": d.get("llm_fallback_status"),
-                "LLM Fallback Decision": d.get("llm_fallback_decision"),
+                "LLM Decision": d.get("llm_fallback_decision"),
                 "LLM Fallback Confidence": d.get("llm_fallback_confidence"),
                 "LLM Fallback Reason": d.get("llm_fallback_reason"),
                 "Source Keyword": d.get("source_keyword"),

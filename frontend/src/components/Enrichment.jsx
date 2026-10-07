@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Sparkles, Upload, Square, Loader2, Database, RefreshCw, Search as SearchIcon } from 'lucide-react';
-import EnrichmentResults, { CategoryChip } from './EnrichmentResults';
+import EnrichmentResults, { Row, RowHeader } from './EnrichmentResults';
 import { parseEnrichmentFile, streamEnrichment, fetchEnrichments, downloadEnrichmentXlsx } from '../api';
 
 export default function Enrichment() {
@@ -12,6 +12,7 @@ export default function Enrichment() {
     const [error, setError] = useState('');
     const [stored, setStored] = useState({ total: 0, items: [] });
     const [query, setQuery] = useState('');
+    const [openStored, setOpenStored] = useState(null);
     const abortRef = useRef(null);
     const fileRef = useRef(null);
 
@@ -139,23 +140,14 @@ export default function Enrichment() {
                         <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search name, domain, industry…" className="w-64 rounded-lg border border-slate-300 py-2 pl-9 pr-3 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500" />
                     </form>
                 </div>
+                {stored.items.length > 0 && <RowHeader />}
                 <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
                     {stored.items.length === 0 ? (
                         <div className="px-6 py-10 text-center text-sm text-slate-500">Nothing stored yet.</div>
                     ) : (
                         <ul className="divide-y divide-slate-200">
                             {stored.items.map((it) => (
-                                <li key={it.id} className="flex flex-wrap items-center justify-between gap-3 px-6 py-3 hover:bg-slate-50">
-                                    <div className="min-w-0">
-                                        <div className="truncate text-sm font-medium text-slate-900">{it.company_name}</div>
-                                        <div className="truncate text-xs text-slate-500">{[it.domain, it.country, it.industry].filter(Boolean).join(' · ')}</div>
-                                    </div>
-                                    <div className="flex items-center gap-3 text-xs text-slate-500">
-                                        <CategoryChip value={it.company_category} />
-                                        <span>{it.pages_crawled} pages</span>
-                                        <span>{it.last_crawled_at ? new Date(it.last_crawled_at).toLocaleDateString() : ''}</span>
-                                    </div>
-                                </li>
+                                <Row key={it.id} r={it} open={openStored === it.id} onToggle={() => setOpenStored(openStored === it.id ? null : it.id)} />
                             ))}
                         </ul>
                     )}

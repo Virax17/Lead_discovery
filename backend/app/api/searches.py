@@ -10,6 +10,8 @@ from app.models.schemas import SearchCreate, Search, MasterBusiness, SearchResul
 from app.db.connection import get_db
 from app.services.search_runner import run_region_search
 from app.services.search_recovery import mark_stale_running_searches
+from app.services.company_cache import normalize_domain
+from app.services.enrichment_store import enrichment_summaries
 from app.services.export_engine import export_search
 from app.services.storage import s3_enabled, local_path, presigned_url
 
@@ -131,11 +133,13 @@ async def get_search(id: str, current_user: dict = Depends(get_current_user_prof
         cursor = db.search_results.aggregate(pipeline)
         docs = await cursor.to_list(length=None)
         
+        enrichments = await enrichment_summaries(db, [d["business"] for d in docs])
         results = []
         for d in docs:
             b = d["business"]
             b["id"] = str(b["_id"])
             del b["_id"]
+            b["enrichment"] = enrichments.get(normalize_domain(b.get("website") or ""))
             results.append(b)
             
         response["businesses"] = results

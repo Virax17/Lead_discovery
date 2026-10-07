@@ -4,22 +4,17 @@ import { AlertTriangle, Download, SlidersHorizontal, X } from 'lucide-react';
 import { downloadFile, fetchSearch } from '../api';
 import { useI18n } from '../i18n/I18nContext';
 import { useShell } from '../context/ShellContext';
+import { CompetitorBadge, EnrichButton, PRIORITY_COLUMNS, customerTypeLabel, isCompetitor, listText } from './leadShared';
 
 // Decision-relevant fields first (identity, then the actual verdict and
 // why), internal debug/signal fields after — so the columns that matter
 // for "is this a real lead" aren't buried behind crawler internals.
 const DEFAULT_COLUMNS = [
-    { key: 'source', label: 'Source' },
-    { key: 'name', label: 'Company Name' },
-    { key: 'address', label: 'Address' },
-    { key: 'website', label: 'Website' },
-    { key: 'phone_number', label: 'Phone Number' },
-    { key: 'crawl_tier', label: 'Crawl Tier' },
+    ...PRIORITY_COLUMNS,
+    { key: 'is_competitor', label: 'Is Competitor' },
     { key: 'business_role', label: 'Business Role' },
-    { key: 'llm_fallback_decision', label: 'LLM Fallback Decision' },
     { key: 'crawl_reason', label: 'Crawl Reason' },
     { key: 'llm_fallback_reason', label: 'LLM Fallback Reason' },
-    { key: 'industry_type', label: 'Industry Type' },
     { key: 'crawl_score', label: 'Crawl Score' },
     { key: 'llm_fallback_status', label: 'LLM Fallback' },
     { key: 'llm_fallback_confidence', label: 'LLM Fallback Confidence' },
@@ -83,6 +78,13 @@ export default function Results() {
             navigate('/');
         });
     }, [id, navigate, refreshQuota]);
+
+    const enrichBusiness = (businessId, enrichment) => {
+        setSearchData(prev => ({
+            ...prev,
+            businesses: prev.businesses.map(b => (b.id === businessId ? { ...b, enrichment } : b)),
+        }));
+    };
 
     const businesses = searchData?.businesses || [];
     const filteredBusinesses = useMemo(
@@ -220,21 +222,36 @@ export default function Results() {
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-200 bg-white">
-                            {filteredBusinesses.map((business, index) => (
-                                <tr key={index} className="hover:bg-slate-50">
+                            {filteredBusinesses.map((business) => (
+                                <tr key={business.id} className={isCompetitor(business) ? 'bg-rose-50/60 hover:bg-rose-50' : 'hover:bg-slate-50'}>
                                     <td className="px-6 py-4 text-sm text-slate-600">LeadDiscovery</td>
-                                    <td className="px-6 py-4 text-sm font-medium text-slate-900">{business.name}</td>
-                                    <td className="px-6 py-4 text-sm text-slate-600">{business.address}</td>
+                                    <td className="px-6 py-4 text-sm font-medium text-slate-900">
+                                        <div className="flex items-center gap-2">
+                                            <span>{business.name}</span>
+                                            <CompetitorBadge r={business} />
+                                        </div>
+                                    </td>
                                     <td className="px-6 py-4 text-sm text-blue-600 hover:underline">
                                         {business.website ? <a href={business.website} target="_blank" rel="noreferrer">Website</a> : '-'}
                                     </td>
+                                    <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{business.address}</td>
                                     <td className="px-6 py-4 text-sm text-slate-600">{business.phone_number || '-'}</td>
                                     <td className="px-6 py-4 text-sm font-semibold capitalize text-slate-700">{business.crawl_tier || 'unknown'}</td>
-                                    <td className="px-6 py-4 text-sm font-medium text-slate-700">{business.business_role || '-'}</td>
                                     <td className="px-6 py-4 text-sm font-semibold capitalize text-slate-700">{business.llm_fallback_decision || '-'}</td>
+                                    <td className="px-6 py-4 text-sm text-slate-600">{business.industry_type || business.enrichment?.industry || '-'}</td>
+                                    <td className="px-6 py-4 text-sm font-medium text-slate-700">{customerTypeLabel(business.business_role)}</td>
+                                    <td className="max-w-sm px-6 py-4 text-sm text-slate-600">
+                                        {business.enrichment
+                                            ? listText(business.enrichment.projects_or_recent_activity)
+                                            : business.website
+                                                ? <EnrichButton business={business} onEnriched={(enrichment) => enrichBusiness(business.id, enrichment)} />
+                                                : '-'}
+                                    </td>
+                                    <td className="max-w-sm px-6 py-4 text-sm text-slate-600">{listText(business.enrichment?.tritorc_relevance)}</td>
+                                    <td className="px-6 py-4 text-sm font-semibold text-slate-700">{isCompetitor(business) ? 'Yes' : 'No'}</td>
+                                    <td className="px-6 py-4 text-sm font-medium text-slate-700">{business.business_role || '-'}</td>
                                     <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{business.crawl_reason || '-'}</td>
                                     <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{business.llm_fallback_reason || '-'}</td>
-                                    <td className="px-6 py-4 text-sm text-slate-600">{business.industry_type || '-'}</td>
                                     <td className="px-6 py-4 text-sm text-slate-600">{business.crawl_score ?? '-'}</td>
                                     <td className="px-6 py-4 text-sm text-slate-600">{business.llm_fallback_status || '-'}</td>
                                     <td className="px-6 py-4 text-sm text-slate-600">{business.llm_fallback_confidence ?? '-'}</td>

@@ -296,6 +296,16 @@ export async function streamEnrichment(companies, forceRefresh, onEvent, signal)
     }
 }
 
+export async function enrichSingle({ companyName, website, placeId }) {
+    const res = await authorizedFetch(`${API_BASE}/enrichment/enrich-single`, {
+        method: "POST",
+        body: JSON.stringify({ company_name: companyName, website, place_id: placeId }),
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.detail || "Enrichment failed");
+    return data;
+}
+
 export async function fetchEnrichments({ q = "", category = "", skip = 0, limit = 50 } = {}) {
     const params = new URLSearchParams({ skip, limit });
     if (q) params.set("q", q);

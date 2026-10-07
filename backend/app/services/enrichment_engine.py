@@ -61,7 +61,7 @@ TRITORC_BLOCK = json.dumps(
 
 EMPTY_RESULT = {
     "company_name": None, "website": None, "country": None, "hq_city": None, "hq_address": None, "industry": None,
-    "company_category": None, "business_description": None,
+    "company_category": None, "is_competitor": False, "employee_count": None, "business_description": None,
     "key_operations": [], "projects_or_recent_activity": [], "tritorc_relevance": [],
 }
 
@@ -344,11 +344,18 @@ ENRICHMENT_SCHEMA_HINT = """{
   "hq_address": "",
   "industry": "",
   "company_category": "",
+  "is_competitor": false,
+  "employee_count": null,
   "business_description": "",
   "key_operations": [],
   "projects_or_recent_activity": [],
   "tritorc_relevance": []
 }"""
+
+COMPETITOR_BRANDS = (
+    "HYTORC, Enerpac, Hydratight, Atlas Copco, Hi-Force, RAD Torque, ITH, Riverhawk, "
+    "TorcUP, Norbar, SPX FLOW Power Team, Wren Hydraulic, Equalizer International"
+)
 
 def build_prompt(company_name, website, crawled_pages, no_site_found, extra_note=None, text_budget=None):
     text_budget = text_budget or PROMPT_TEXT_BUDGET
@@ -367,7 +374,7 @@ def build_prompt(company_name, website, crawled_pages, no_site_found, extra_note
         )
         source_block = f"WEBSITE CONTENT (scraped just now):\n{joined}"
 
-    return f"""You are a B2B research analyst. Research the company "{company_name}" using ONLY the source material given below (website text if provided). Do not invent facts not supported by the source; if something is unknown, use null or an empty list.
+    return f"""You are a B2B sales-intelligence analyst for Tritorc, a maker of hydraulic torque wrenches, bolt tensioners, flange management and on-site machining tools, and a provider of controlled-bolting and related field services. Profile the company "{company_name}" so Tritorc's sales team can decide whether it is a customer, a channel partner, or a competitor. Use ONLY the source material given below (website text if provided). Never invent facts; if something is unknown, use null or an empty list.
 
 {source_block}
 
@@ -377,14 +384,20 @@ TASK: Return a single JSON object with EXACTLY this shape (no extra keys, no mar
 Field rules:
 - "company_name": the company's proper name.
 - "website": the root URL used as source, or null if none.
-- "country": the country of the company's headquarters. Look at contact/about/footer text for an address or "headquartered in". Use the full English country name. null only if truly not stated.
+- "country": the country of the company's headquarters. Check contact/about/footer text for "headquarters", "head office", "registered office" or "corporate office"; if several offices are listed, prefer the one carrying one of those labels, otherwise the first address on the contact page. Use the full English country name. null only if truly not stated.
 - "hq_city": the headquarters city, or null.
-- "hq_address": the headquarters street address exactly as written in the source, or null.
-- "industry": the company's primary industry (e.g. "Oil & Gas", "Power Generation", "Steel Manufacturing", "Wind Energy", "Mining", "Construction", "Petrochemical", etc.) based on the source text.
-- "company_category": MUST be exactly one of "distributor", "ECP", "end_user". Use "distributor" if the company resells/distributes industrial tools or equipment. Use "ECP" if it is an engineering/construction/procurement contractor delivering projects for others. Use "end_user" for every other private company or government/public-sector organization that would use industrial tools/services in its own operations (this covers both private firms and government bodies).
+- "hq_address": the headquarters street address exactly as written in the source, including postal/zip code when present, or null.
+- "industry": the company's primary industry, as specific as the source allows (e.g. "LNG Terminal Operations" rather than "Energy"). Typical values: "Oil & Gas", "Refining", "Petrochemical", "Power Generation", "Nuclear", "Wind Energy", "Steel Manufacturing", "Cement", "Pulp & Paper", "Mining", "Shipbuilding", "Water/Wastewater", "Aerospace", "Construction", "Industrial Maintenance".
+- "company_category": MUST be exactly one of "competitor", "distributor", "ECP", "end_user". Decide in this order:
+  1. "competitor" if the company manufactures, brands, rents or sells the same tool categories Tritorc sells (hydraulic torque wrenches, bolt tensioners, flange management or on-site machining tools). Known competitor brands: {COMPETITOR_BRANDS}. A service contractor that merely USES such tools is NOT a competitor.
+  2. "distributor" if it resells/distributes industrial tools or equipment made by others.
+  3. "ECP" if it is an engineering/construction/procurement contractor or field-service contractor delivering projects for others.
+  4. "end_user" for every other private company or government/public-sector organization that would use industrial tools/services in its own operations.
+- "is_competitor": true when "company_category" is "competitor", otherwise false.
+- "employee_count": approximate headcount as an integer if the source states it (e.g. "over 5,000 employees" -> 5000), otherwise null.
 - "business_description": 2-4 factual sentences describing what the company does, grounded in the source text.
 - "key_operations": up to 8 concrete operational activities/business lines taken from the source. Prefer specific ones ("turbine maintenance", "pipeline construction") over generic ones ("consulting", "engineering").
-- "projects_or_recent_activity": at most 5 of the most notable or recent named projects, plants, contracts, expansions or news items from the source, each with its year if stated. Empty list if none.
+- "projects_or_recent_activity": at most 5 of the most notable or recent named projects, plants, contracts, expansions or news items from the source. Each as "Project/contract (client if named, scope or value if stated) (year)". Newest first. Empty list if none.
 - "tritorc_relevance": list of short strings, each naming a SPECIFIC Tritorc product category, example product, or service from the catalog below AND why it's relevant to this company's operations (e.g. "Hydraulic Torque Wrenches (e.g. TSL Series) — relevant for flange bolting during the refinery turnarounds mentioned on their site"). Only reference items that actually appear in the catalog below. If nothing in the source material suggests a real need, return an empty list rather than forcing a match.
 
 TRITORC PRODUCT & SERVICE CATALOG (only reference items from this list in tritorc_relevance):
@@ -628,10 +641,39 @@ def enrich_company(client, company_input: str, pages: list | None = None, websit
     data.setdefault("company_name", display_name)
     if not data.get("website"):
         data["website"] = website
+    fit = score_pages(data.get("company_name") or display_name, data.get("website") or website, pages)
     meta = {
         "crawl_status": "ok" if pages else "no_content",
         "crawl_error": None if pages else err,
         "contacts": contacts,
-        "fit": score_pages(data.get("company_name") or display_name, data.get("website") or website, pages),
+        "fit": fit,
     }
+    reconcile_competitor(data, fit)
     return data, pages, meta
+
+
+VALID_CATEGORIES = {"competitor", "distributor", "ECP", "end_user"}
+
+
+def reconcile_competitor(data: dict, fit: dict | None) -> None:
+    """Keep company_category / is_competitor consistent and let either the LLM
+    or the rule-based scorer mark a competitor (HYTORC, Enerpac, ...)."""
+    cat = data.get("company_category")
+    if cat not in VALID_CATEGORIES:
+        cat = {"ecp": "ECP", "end user": "end_user", "enduser": "end_user"}.get(str(cat or "").strip().lower(), cat if cat in VALID_CATEGORIES else None)
+    scorer_says = (fit or {}).get("business_role") == "competitor_manufacturer"
+    own = "tritorc" in f"{data.get('website') or ''} {data.get('company_name') or ''}".lower()
+    if own:
+        data["is_competitor"] = False
+        cat = None if cat == "competitor" else cat
+    elif scorer_says or data.get("is_competitor") is True or cat == "competitor":
+        cat = "competitor"
+        data["is_competitor"] = True
+    else:
+        data["is_competitor"] = False
+    data["company_category"] = cat
+    emp = data.get("employee_count")
+    if isinstance(emp, str):
+        digits = re.sub(r"[^\d]", "", emp)
+        emp = int(digits) if digits else None
+    data["employee_count"] = emp if isinstance(emp, int) and emp > 0 else None

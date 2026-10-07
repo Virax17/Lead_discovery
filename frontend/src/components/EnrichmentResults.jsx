@@ -1,8 +1,10 @@
 import React, { useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight, Download, Database, ExternalLink, Mail, Phone, MapPin, Search as SearchIcon } from 'lucide-react';
+import { ChevronDown, ChevronRight, Download, Database, ExternalLink, MapPin, Search as SearchIcon } from 'lucide-react';
+import { CompetitorBadge, customerTypeLabel, isCompetitor } from './leadShared';
 
-const CATEGORY_LABELS = { distributor: 'Distributor', ECP: 'EPC / Contractor', end_user: 'End user' };
+const CATEGORY_LABELS = { competitor: 'Competitor', distributor: 'Distributor', ECP: 'EPC / Contractor', end_user: 'End user' };
 const CATEGORY_STYLES = {
+    competitor: 'bg-rose-100 text-rose-700',
     distributor: 'bg-amber-100 text-amber-700',
     ECP: 'bg-violet-100 text-violet-700',
     end_user: 'bg-emerald-100 text-emerald-700',
@@ -95,6 +97,7 @@ function Detail({ r }) {
             <dl className="grid gap-x-8 gap-y-4 sm:grid-cols-2 lg:grid-cols-4">
                 <Fact label="Headquarters">{r.hq_address || loc}</Fact>
                 <Fact label="Industry">{r.industry}</Fact>
+                <Fact label="Employees">{r.employee_count ? `~${r.employee_count.toLocaleString()}` : null}</Fact>
                 <Fact label="Email">{r.contact_emails?.join(', ')}</Fact>
                 <Fact label="Phone">{r.contact_phones?.join(', ')}</Fact>
             </dl>
@@ -165,43 +168,65 @@ function Detail({ r }) {
     );
 }
 
-function Row({ r, open, onToggle }) {
-    const loc = [r.hq_city, r.country].filter(Boolean).join(', ');
+const ROW_GRID = 'md:grid-cols-[minmax(0,2fr)_minmax(0,1.4fr)_116px_96px_120px_116px]';
+
+export function RowHeader() {
     return (
-        <li className="bg-white">
+        <div className={`hidden gap-x-4 px-5 text-[11px] font-bold uppercase tracking-[0.14em] text-slate-400 md:grid ${ROW_GRID}`}>
+            <span className="pl-7">Company · Source</span><span>Address</span><span>Phone</span><span>Crawl tier</span><span>LLM decision</span><span>Customer type</span>
+        </div>
+    );
+}
+
+export function Row({ r, open, onToggle }) {
+    const loc = [r.hq_city, r.country].filter(Boolean).join(', ');
+    const address = r.hq_address || loc;
+    const firstFit = r.tritorc_relevance?.[0];
+    const [fitProduct] = firstFit ? String(firstFit).split(/\s[—–-]\s/) : [];
+    const firstProject = r.projects_or_recent_activity?.[0];
+    const competitor = isCompetitor(r);
+    return (
+        <li className={competitor ? 'bg-rose-50/60' : 'bg-white'}>
             <button
                 onClick={onToggle}
                 aria-expanded={open}
-                className="grid w-full grid-cols-[1fr_auto] items-center gap-x-4 gap-y-2 px-5 py-3.5 text-left transition-colors hover:bg-slate-50 md:grid-cols-[minmax(0,2.2fr)_minmax(0,1.2fr)_auto_auto_auto]"
+                className={`grid w-full grid-cols-[1fr_auto] items-center gap-x-4 gap-y-1.5 px-5 py-3.5 text-left transition-colors hover:bg-slate-50 ${ROW_GRID}`}
             >
                 <div className="flex min-w-0 items-center gap-3">
                     {open ? <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" /> : <ChevronRight className="h-4 w-4 shrink-0 text-slate-400" />}
                     <div className="min-w-0">
                         <div className="flex items-center gap-2">
                             <span className="truncate text-sm font-semibold text-slate-900">{r.company_name || r.input}</span>
+                            <CompetitorBadge r={r} />
                             {r.cache_hit && <span title="Served from the stored crawl — no re-crawl"><Database className="h-3.5 w-3.5 shrink-0 text-blue-500" /></span>}
                         </div>
                         {r.error ? (
                             <div className="truncate text-xs text-rose-600" title={r.business_description}>{r.business_description}</div>
                         ) : (
                             <div className="truncate text-xs text-slate-500">
-                                {r.domain || r.website || '—'}{r.industry ? ` · ${r.industry}` : ''}
+                                Enrichment · {r.domain || r.website || '—'}{r.industry ? ` · ${r.industry}` : ''}
                                 {r.crawl_status && r.crawl_status !== 'ok' && <span className="text-amber-600"> · site could not be crawled</span>}
                             </div>
                         )}
                     </div>
                 </div>
-                <div className="hidden min-w-0 items-center justify-self-start gap-1 text-sm text-slate-600 md:flex">
-                    {loc && <><MapPin className="h-3.5 w-3.5 shrink-0 text-slate-400" /><span className="truncate">{loc}</span></>}
+                <div className="hidden min-w-0 items-center justify-self-start gap-1 text-sm text-slate-600 md:flex" title={address}>
+                    {address && <><MapPin className="h-3.5 w-3.5 shrink-0 text-slate-400" /><span className="truncate">{address}</span></>}
+                </div>
+                <div className="hidden min-w-0 truncate text-sm text-slate-600 md:block" title={r.contact_phones?.join(', ')}>
+                    {r.contact_phones?.[0] || <span className="text-slate-300">—</span>}
                 </div>
                 <div className="flex items-center gap-2 justify-self-end md:justify-self-auto">
                     <TierChip r={r} />
                 </div>
                 <div className="hidden md:block"><CategoryChip value={r.company_category} /></div>
-                <div className="hidden items-center gap-2 text-slate-400 md:flex" title="Contact details found">
-                    <Mail className={`h-4 w-4 ${r.contact_emails?.length ? 'text-slate-600' : 'opacity-30'}`} />
-                    <Phone className={`h-4 w-4 ${r.contact_phones?.length ? 'text-slate-600' : 'opacity-30'}`} />
-                </div>
+                <div className="hidden truncate text-sm text-slate-700 md:block">{customerTypeLabel(r.business_role)}</div>
+                {(fitProduct || firstProject) && (
+                    <div className="col-span-full grid gap-x-6 gap-y-0.5 pl-7 text-xs text-slate-500 md:grid-cols-2">
+                        {fitProduct && <div className="truncate"><span className="font-semibold text-slate-600">Fits: </span>{fitProduct}</div>}
+                        {firstProject && <div className="truncate"><span className="font-semibold text-slate-600">Recent: </span>{firstProject}</div>}
+                    </div>
+                )}
             </button>
             {open && <Detail r={r} />}
         </li>
@@ -281,9 +306,7 @@ export default function EnrichmentResults({ results, onExport }) {
                 </div>
             </div>
 
-            <div className="hidden grid-cols-[minmax(0,2.2fr)_minmax(0,1.2fr)_auto_auto_auto] gap-x-4 px-5 text-[11px] font-bold uppercase tracking-[0.14em] text-slate-400 md:grid">
-                <span className="pl-7">Company</span><span>HQ</span><span>Fit</span><span>Type</span><span>Contact</span>
-            </div>
+            <RowHeader />
             <ul className="divide-y divide-slate-200 overflow-hidden rounded-2xl border border-slate-200 shadow-sm">
                 {visible.map(({ r, k }) => <Row key={k} r={r} open={openKeys.has(k)} onToggle={() => toggle(k)} />)}
                 {visible.length === 0 && <li className="bg-white px-5 py-8 text-center text-sm text-slate-500">No companies match this filter.</li>}

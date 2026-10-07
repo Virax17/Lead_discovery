@@ -116,6 +116,29 @@ async def get_cached_pages(domain: str) -> list[dict] | None:
     return doc["crawled_pages"]
 
 
+ENRICHMENT_SUMMARY_FIELDS = (
+    "company_name", "business_description", "country", "hq_city", "hq_address", "industry",
+    "company_category", "is_competitor", "employee_count", "customer_type",
+    "tritorc_relevance", "projects_or_recent_activity", "key_operations",
+    "contact_emails", "contact_phones", "social_links", "crawl_tier", "crawl_score", "business_role",
+)
+
+
+async def enrichment_summaries(db, docs: list[dict]) -> dict:
+    """LLM-enriched profile for a page of businesses, keyed by domain. One
+    query for the whole page; crawled page text is not loaded."""
+    domains = {normalize_domain(d.get("website") or "") for d in docs}
+    domains.discard(None)
+    if not domains:
+        return {}
+    projection = {field: 1 for field in ENRICHMENT_SUMMARY_FIELDS}
+    projection["domain"] = 1
+    found = {}
+    async for e in db[COLLECTION].find({"domain": {"$in": list(domains)}}, projection):
+        found[e["domain"]] = {k: e.get(k) for k in ENRICHMENT_SUMMARY_FIELDS}
+    return found
+
+
 async def link_place_id(domain: str, place_id: str) -> None:
     """For the Places/map pipeline: tie a master_businesses place_id to an
     enrichment so find_enrichment(place_id=...) works."""
@@ -173,8 +196,9 @@ async def _save(entry: str, username: str, data: dict, pages: list, meta: dict) 
     fields = {
         **{k: data.get(k) for k in (
             "company_name", "website", "country", "hq_city", "hq_address", "industry", "company_category",
-            "business_description",
+            "business_description", "employee_count",
         )},
+        "is_competitor": bool(data.get("is_competitor")),
         "contact_emails": meta["contacts"]["emails"],
         "contact_phones": meta["contacts"]["phones"],
         "social_links": meta["contacts"]["social_links"],
