@@ -7,14 +7,66 @@ This project is currently documented for a lightweight EC2 deployment.
 ```text
 EC2 instance: t3.micro
 OS: Ubuntu 24.04
-Backend: FastAPI / Uvicorn
+Backend: FastAPI / Uvicorn, run as a Docker container
+Image: ghcr.io/tritorc-ai1/lead-discovery-backend (built by GitHub Actions)
 Backend bind: 127.0.0.1:8001
-Process manager: systemd
-Service name: lead-discovery.service
+Process manager: Docker (restart: unless-stopped)
 Reverse proxy: nginx on port 80
 Database: MongoDB Atlas
-Frontend: Vite React build served by nginx or separate static hosting
+Frontend: Vite React build served by nginx or separate static hosting (Vercel today)
 ```
+
+## Automatic deploys (Docker + GitHub Actions)
+
+Pushing to `master` (changes under `backend/`, `docker-compose.yml` or the workflow) runs
+`.github/workflows/deploy-backend.yml`:
+
+1. **build** - builds `backend/Dockerfile` and pushes `:latest` and `:<commit sha>` to GHCR.
+   Pull requests only build the image (no push, no deploy).
+2. **deploy** - copies `docker-compose.yml` to `/opt/lead-discovery/` on the EC2 host over SSH,
+   pulls the new image, runs `docker compose up -d`, and fails the run if
+   `http://127.0.0.1:8001/health` is not healthy within about 60 seconds.
+
+The image is built in GitHub Actions, never on the server (the t3.micro has 1 GB RAM).
+Secrets stay in `/opt/lead-discovery/.env` on the server and are passed in with `env_file`.
+Exports are kept in `/opt/lead-discovery/exports` (mounted into the container).
+
+### One-time setup
+
+1. Allocate an Elastic IP and associate it with the instance, then add it to the Atlas
+   Network Access list of the project that owns the cluster in `MONGO_URI`.
+2. Run `deploy/deploy_docker_setup.sh` on the server (installs Docker, adds swap, creates dirs):
+
+   ```bash
+   scp -i <key>.pem deploy/deploy_docker_setup.sh ubuntu@<EIP>:~/
+   ssh -i <key>.pem ubuntu@<EIP> "sudo bash ~/deploy_docker_setup.sh"
+   ```
+
+3. Add GitHub repository secrets: `EC2_HOST` (Elastic IP), `EC2_USER` (`ubuntu`),
+   `EC2_SSH_KEY` (contents of the `.pem` key). The registry login uses the built-in
+   `GITHUB_TOKEN`, so no extra token is needed.
+4. Merge to `master`. The first deploy stops and disables `lead-discovery.service` and starts
+   the container in its place.
+
+### Rollback
+
+```bash
+# redeploy an older build
+cd /opt/lead-discovery && IMAGE_TAG=<older-commit-sha> docker compose up -d
+
+# or go back to the old systemd service
+cd /opt/lead-discovery && docker compose down && sudo systemctl enable --now lead-discovery
+```
+
+Useful commands on the server:
+
+```bash
+docker compose ps
+docker compose logs -f backend
+```
+
+The sections below describe the previous systemd setup and the values the app needs; the
+environment variables apply to the container as well.
 
 ## Backend runtime
 
