@@ -22,7 +22,19 @@ CUSTOMER_TYPE_LABELS = {
 }
 
 
-def customer_type_label(role: Optional[str]) -> str:
+CATEGORY_LABELS = {
+    "competitor": "Competitor",
+    "distributor": "Distributor",
+    "ECP": "EPC",
+    "end_user": "End User",
+}
+
+
+def customer_type_label(role: Optional[str], category: Optional[str] = None) -> str:
+    """The enrichment LLM's category (EPC, End User, ...) wins when present;
+    otherwise the crawler's business role."""
+    if category in CATEGORY_LABELS:
+        return CATEGORY_LABELS[category]
     return CUSTOMER_TYPE_LABELS.get(role or "unknown", "Unknown")
 
 
@@ -44,6 +56,7 @@ def _enrichment_row(enrichments: dict, website: Optional[str], role: Optional[st
     own = "tritorc" in (website or "").lower()
     is_competitor = not own and (role == "competitor_manufacturer" or bool(e.get("is_competitor")))
     return {
+        "Customer Type": customer_type_label(role, e.get("company_category")),
         "Recent Projects": _join_list(e.get("projects_or_recent_activity")),
         "Tritorc Relevance": _join_list(e.get("tritorc_relevance")),
         "Is Competitor": "Yes" if is_competitor else "No",
@@ -186,7 +199,6 @@ async def export_search(
         docs = await db.search_results.aggregate(pipeline).to_list(length=None)
         enrichments = await _enrichment_cells(db, [d.get("Website") for d in docs])
         for d in docs:
-            d["Customer Type"] = customer_type_label(d.get("_role"))
             d.update(_enrichment_row(enrichments, d.get("Website"), d.get("_role")))
         df = pd.DataFrame(docs, columns=EXPORT_COLUMNS)
         if "_id" in df.columns:
@@ -247,7 +259,6 @@ async def export_country(
                 "Google Maps URL": d.get("maps_url"),
                 "Industry Type": d.get("industry_type"),
                 "Industry Sector": d.get("industry_sector"),
-                "Customer Type": customer_type_label(d.get("business_role")),
                 **_enrichment_row(enrichments, d.get("website"), d.get("business_role")),
                 "Website Signal": d.get("website_signal"),
                 "Crawl Tier": d.get("crawl_tier"),

@@ -16,6 +16,9 @@ import re
 import unicodedata
 from datetime import datetime, timedelta
 
+from bson import ObjectId
+from bson.errors import InvalidId
+
 from app.config.settings import settings
 from app.db.connection import get_db
 from app.services.company_cache import normalize_domain
@@ -32,6 +35,9 @@ from app.services.enrichment_engine import (
 COLLECTION = "company_enrichments"
 # v2: 8-page crawl (contact/about first), contacts + HQ extraction, fit scoring.
 ENRICHMENT_CRAWL_VERSION = "enrichment-crawl-v2"
+# Bump when the LLM verdict rules change: stored companies are re-judged from
+# their saved pages (no re-crawl) the next time they are enriched.
+ENRICHMENT_LLM_VERSION = "verdict-v3"  # v2 added the A/B/C turnover class; v3 tolerant basis parsing
 
 _LEGAL_SUFFIXES = re.compile(
     r"\b(inc|incorporated|llc|ltd|limited|plc|corp|corporation|co|company|gmbh|ag|sa|sdn|bhd|pvt|pte|llp|bv|nv|oy|ab|as|spa|srl|se|kg|nv|pty)\b"
@@ -119,6 +125,8 @@ async def get_cached_pages(domain: str) -> list[dict] | None:
 ENRICHMENT_SUMMARY_FIELDS = (
     "company_name", "business_description", "country", "hq_city", "hq_address", "industry",
     "company_category", "is_competitor", "employee_count", "customer_type",
+    "llm_decision", "llm_decision_reason", "override_decision", "override_note",
+    "turnover_class", "turnover_basis", "annual_turnover",
     "tritorc_relevance", "projects_or_recent_activity", "key_operations",
     "contact_emails", "contact_phones", "social_links", "crawl_tier", "crawl_score", "business_role",
 )
@@ -158,10 +166,103 @@ async def _lookup_for_input(entry: str) -> dict | None:
     return await coll.find_one({"name_keys": nkey}) if nkey else None
 
 
+def _oid(value) -> ObjectId | None:
+    try:
+        return ObjectId(str(value))
+    except (InvalidId, TypeError):
+        return None
+
+
+async def correct_match(client, input_text: str, website: str, wrong_id: str | None, username: str) -> dict:
+    """The user says `input_text` was matched to the wrong company. Detach the
+    typed name from the wrong record (so it can't match it again), enrich the
+    website they gave, and attach the typed name to that record instead."""
+    coll = get_db()[COLLECTION]
+    nkey = name_key(input_text)
+    wrong = _oid(wrong_id)
+    if wrong:
+        pull: dict = {"input_aliases": input_text}
+        if nkey:
+            pull["name_keys"] = nkey
+        await coll.update_one({"_id": wrong}, {"$pull": pull})
+    doc = await get_or_enrich(client, website, username)
+    right = _oid(doc.get("id"))
+    if right:
+        add: dict = {"input_aliases": input_text}
+        if nkey:
+            add["name_keys"] = nkey
+        await coll.update_one({"_id": right}, {"$addToSet": add})
+    return doc
+
+
+async def set_override(doc_id: str, decision: str | None, note: str | None, username: str) -> dict | None:
+    """Record the user's own accept/review/reject call. It lives in separate
+    fields, so re-enriching never overwrites it. decision=None clears it."""
+    oid = _oid(doc_id)
+    if not oid:
+        return None
+    coll = get_db()[COLLECTION]
+    if decision in ("accept", "review", "reject"):
+        update = {"$set": {
+            "override_decision": decision,
+            "override_note": (note or "").strip()[:300] or None,
+            "override_by": username,
+            "override_at": datetime.utcnow(),
+        }}
+    else:
+        update = {"$unset": {"override_decision": "", "override_note": "", "override_by": "", "override_at": ""}}
+    res = await coll.update_one({"_id": oid}, update)
+    if res.matched_count == 0:
+        return None
+    return serialize(await coll.find_one({"_id": oid}))
+
+
+_REJUDGE_SCALARS = (
+    "country", "hq_city", "hq_address", "industry", "company_category", "business_description", "employee_count",
+)
+
+
+async def _rejudge(client, entry: str, cached: dict) -> dict | None:
+    """Re-run only the LLM on the stored pages (no crawl) to add the verdict
+    and any improved fields. Returns the updated document, or None if the LLM
+    call fails (the caller then serves the cached record unchanged)."""
+    loop = asyncio.get_running_loop()
+    try:
+        data, _pages, meta = await loop.run_in_executor(
+            None, enrich_company, client, entry, cached["crawled_pages"], cached.get("website")
+        )
+    except Exception:
+        return None
+    now = datetime.utcnow()
+    update = {k: data[k] for k in _REJUDGE_SCALARS if data.get(k) not in (None, "")}
+    update.update({k: data[k] for k in ("key_operations", "projects_or_recent_activity", "tritorc_relevance") if data.get(k)})
+    update.update(
+        {
+            "is_competitor": bool(data.get("is_competitor")),
+            "llm_decision": data.get("llm_decision"),
+            "llm_decision_reason": data.get("llm_decision_reason"),
+            "turnover_class": data.get("turnover_class"),
+            "turnover_basis": data.get("turnover_basis"),
+            "annual_turnover": data.get("annual_turnover"),
+            "llm_version": ENRICHMENT_LLM_VERSION,
+            "llm_model": settings.groq_model,
+            "updated_at": now,
+            **meta.get("fit", {}),
+        }
+    )
+    coll = get_db()[COLLECTION]
+    await coll.update_one({"_id": cached["_id"]}, {"$set": update, "$inc": {"hit_count": 1}})
+    return await coll.find_one({"_id": cached["_id"]})
+
+
 async def get_or_enrich(client, entry: str, username: str, force_refresh: bool = False) -> dict:
     """cache -> (crawl + LLM) -> store. Result carries `cache_hit`."""
     entry = entry.strip()
     cached = None if force_refresh else await _lookup_for_input(entry)
+    if cached and _is_fresh(cached) and cached.get("crawled_pages") and cached.get("llm_version") != ENRICHMENT_LLM_VERSION:
+        rejudged = await _rejudge(client, entry, cached)
+        if rejudged:
+            return {**serialize(rejudged), "cache_hit": True, "rejudged": True}
     if cached and _is_fresh(cached):
         update: dict = {"$inc": {"hit_count": 1}}
         if cached.get("scoring_version") != SCORING_VERSION and cached.get("crawled_pages"):
@@ -196,9 +297,11 @@ async def _save(entry: str, username: str, data: dict, pages: list, meta: dict) 
     fields = {
         **{k: data.get(k) for k in (
             "company_name", "website", "country", "hq_city", "hq_address", "industry", "company_category",
-            "business_description", "employee_count",
+            "business_description", "employee_count", "llm_decision", "llm_decision_reason",
+            "turnover_class", "turnover_basis", "annual_turnover",
         )},
         "is_competitor": bool(data.get("is_competitor")),
+        "llm_version": ENRICHMENT_LLM_VERSION,
         "contact_emails": meta["contacts"]["emails"],
         "contact_phones": meta["contacts"]["phones"],
         "social_links": meta["contacts"]["social_links"],

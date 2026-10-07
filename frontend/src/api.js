@@ -306,6 +306,21 @@ export async function enrichSingle({ companyName, website, placeId }) {
     return data;
 }
 
+async function postEnrichment(path, body, fallback) {
+    const res = await authorizedFetch(`${API_BASE}/enrichment/${path}`, { method: "POST", body: JSON.stringify(body) });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(typeof data?.detail === "string" ? data.detail : fallback);
+    return data;
+}
+
+// "Wrong company?": the user gives the right website for a typed name.
+export const correctEnrichment = ({ input, website, wrongId }) =>
+    postEnrichment("correct", { input, website, wrong_id: wrongId }, "Couldn't fix the match. Try again.");
+
+// Save the user's own accept/review/reject call (decision null clears it).
+export const setEnrichmentOverride = ({ id, decision, note }) =>
+    postEnrichment("override", { id, decision, note }, "Couldn't save your decision. Try again.");
+
 export async function fetchEnrichments({ q = "", category = "", skip = 0, limit = 50 } = {}) {
     const params = new URLSearchParams({ skip, limit });
     if (q) params.set("q", q);

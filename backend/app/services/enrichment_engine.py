@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import csv
 import io
+import ipaddress
 import json
 import os
 import re
+import socket
 import time
 from urllib.parse import urljoin, urlparse
 
@@ -53,15 +55,25 @@ with open(_OFFERINGS_PATH, encoding="utf-8") as f:
 # enough to stay well under Groq's per-minute token limits across back-to-back calls.
 TRITORC_BLOCK = json.dumps(
     {
-        "product_categories": TRITORC_OFFERINGS["product_categories"],
-        "services": TRITORC_OFFERINGS["services"],
+        "products": [
+            {
+                "name": c["category"],
+                "examples": c.get("example_products", [])[:3],
+                "uses": c.get("applications", [])[:5],
+            }
+            for c in TRITORC_OFFERINGS["product_categories"]
+        ],
+        "services": [s["name"] if isinstance(s, dict) else s for s in TRITORC_OFFERINGS["services"]],
     },
     ensure_ascii=False,
+    separators=(",", ":"),
 )
 
 EMPTY_RESULT = {
     "company_name": None, "website": None, "country": None, "hq_city": None, "hq_address": None, "industry": None,
-    "company_category": None, "is_competitor": False, "employee_count": None, "business_description": None,
+    "company_category": None, "is_competitor": False, "employee_count": None,
+    "llm_decision": None, "llm_decision_reason": None,
+    "turnover_class": None, "turnover_basis": None, "annual_turnover": None, "business_description": None,
     "key_operations": [], "projects_or_recent_activity": [], "tritorc_relevance": [],
 }
 
@@ -72,18 +84,64 @@ def get_groq_client():
     return Groq(api_key=settings.groq_api_key)
 
 
+class UnsafeURLError(Exception):
+    """The address is not a public website (private network, loopback, cloud metadata...)."""
+
+
+def is_public_url(url: str) -> bool:
+    """True only for http(s) URLs whose host resolves exclusively to public
+    internet addresses. Stops the crawler from being pointed at the server's
+    own network or the EC2 metadata service."""
+    try:
+        p = urlparse(url)
+        if p.scheme not in ("http", "https") or not p.hostname:
+            return False
+        infos = socket.getaddrinfo(p.hostname, p.port or (443 if p.scheme == "https" else 80), type=socket.SOCK_STREAM)
+        addrs = {i[4][0].split("%")[0] for i in infos}
+        if not addrs:
+            return False
+        for a in addrs:
+            ip = ipaddress.ip_address(a)
+            if getattr(ip, "ipv4_mapped", None):
+                ip = ip.ipv4_mapped
+            if not ip.is_global:
+                return False
+        return True
+    except (socket.gaierror, ValueError, UnicodeError, OSError):
+        return False
+
+
+_REDIRECT_CODES = {301, 302, 303, 307, 308}
+
+
+def _guarded_request(method: str, url: str, *, session=None, max_redirects: int = 5, **kwargs):
+    """requests.get/head that re-checks every redirect hop, so a public site
+    cannot bounce the crawler onto an internal address."""
+    sender = session or requests
+    for _ in range(max_redirects + 1):
+        if not is_public_url(url):
+            raise UnsafeURLError(url)
+        resp = getattr(sender, method)(url, allow_redirects=False, **kwargs)
+        location = resp.headers.get("location")
+        if resp.status_code in _REDIRECT_CODES and location:
+            url = urljoin(url, location)
+            continue
+        return resp
+    raise requests.exceptions.TooManyRedirects(f"too many redirects for {url}")
+
+
 def _probe_url(url: str, method: str = "head"):
     """Reachability check only (no data exchanged). Some real corporate sites
     ship an incomplete/misconfigured TLS certificate chain (verified case:
     bilfinger.com fails standard cert validation while resolving and serving
     fine over plain TLS) — retry once without strict verification rather than
     silently treating the whole company as having 'no website'."""
-    fn = requests.head if method == "head" else requests.get
+    name = "head" if method == "head" else "get"
     try:
-        return fn(url, headers={"User-Agent": UA}, timeout=10, allow_redirects=True)
+        return _guarded_request(name, url, headers={"User-Agent": UA}, timeout=10)
     except requests.exceptions.SSLError:
         try:
-            return fn(url, headers={"User-Agent": UA}, timeout=10, allow_redirects=True, verify=False)
+            return _guarded_request(name, url, headers={"User-Agent": UA}, timeout=10, verify=False)
         except Exception:
             return None
     except Exception:
@@ -272,15 +330,15 @@ def crawl_company_site(base_url: str, max_pages: int = MAX_PAGES, timeout: int =
         # some real sites ship an incomplete TLS cert chain; retry once
         # without strict verification rather than dropping the whole crawl.
         try:
-            return session.get(url, timeout=timeout)
+            return _guarded_request("get", url, session=session, timeout=timeout)
         except requests.exceptions.SSLError:
-            return session.get(url, timeout=timeout, verify=False)
+            return _guarded_request("get", url, session=session, timeout=timeout, verify=False)
         except requests.exceptions.RequestException:
             # verified case: some hosts time out on a direct HTTPS connection
             # but work fine when reached via their own http->https redirect
             # (e.g. sceptre.com.my). Retry over plain http as a last resort.
             if url.startswith("https://"):
-                return session.get("http://" + url[len("https://"):], timeout=timeout)
+                return _guarded_request("get", "http://" + url[len("https://"):], session=session, timeout=timeout)
             raise
 
     def add_page(url, soup):
@@ -293,6 +351,8 @@ def crawl_company_site(base_url: str, max_pages: int = MAX_PAGES, timeout: int =
 
     try:
         r = session_get(base_url)
+    except UnsafeURLError:
+        return [], "blocked: that address is not a public website", contacts
     except Exception as e:
         return [], f"error fetching homepage: {e}", contacts
 
@@ -346,18 +406,44 @@ ENRICHMENT_SCHEMA_HINT = """{
   "company_category": "",
   "is_competitor": false,
   "employee_count": null,
+  "llm_decision": "",
+  "llm_decision_reason": "",
+  "turnover_class": "",
+  "turnover_basis": "",
+  "annual_turnover": "",
   "business_description": "",
   "key_operations": [],
   "projects_or_recent_activity": [],
   "tritorc_relevance": []
 }"""
 
+# A/B/C size class by annual turnover (US$ equivalent). Change here to re-band; bump
+# ENRICHMENT_LLM_VERSION in enrichment_store.py so stored companies are re-judged.
+TURNOVER_BANDS = (
+    "Bands: A = US$100 million or more a year (large enterprise), "
+    "B = US$10 million to under US$100 million (mid-size), C = under US$10 million (small)."
+)
+
 COMPETITOR_BRANDS = (
     "HYTORC, Enerpac, Hydratight, Atlas Copco, Hi-Force, RAD Torque, ITH, Riverhawk, "
     "TorcUP, Norbar, SPX FLOW Power Team, Wren Hydraulic, Equalizer International"
 )
 
-def build_prompt(company_name, website, crawled_pages, no_site_found, extra_note=None, text_budget=None):
+def scorer_hint_block(fit: dict | None) -> str:
+    """The rule-based scorer's verdict, shown to the model as a hint only
+    (Lead Discovery's LLM reviewer gets the same context)."""
+    if not fit or not fit.get("crawl_tier"):
+        return ""
+    pos = ", ".join(fit.get("positive_concepts") or []) or "none"
+    neg = ", ".join(fit.get("negative_concepts") or []) or "none"
+    return (
+        "\nAUTOMATED KEYWORD SCORER (HINT ONLY, often wrong, see trap 3): "
+        f"tier={fit.get('crawl_tier')}, score={fit.get('crawl_score')}/100, role={fit.get('business_role')}; "
+        f"positive concepts: {pos}; negative concepts: {neg}; reason: {fit.get('crawl_reason') or 'n/a'}\n"
+    )
+
+
+def build_prompt(company_name, website, crawled_pages, no_site_found, extra_note=None, text_budget=None, scorer_hint=None):
     text_budget = text_budget or PROMPT_TEXT_BUDGET
     if no_site_found:
         source_block = extra_note or (
@@ -377,7 +463,7 @@ def build_prompt(company_name, website, crawled_pages, no_site_found, extra_note
     return f"""You are a B2B sales-intelligence analyst for Tritorc, a maker of hydraulic torque wrenches, bolt tensioners, flange management and on-site machining tools, and a provider of controlled-bolting and related field services. Profile the company "{company_name}" so Tritorc's sales team can decide whether it is a customer, a channel partner, or a competitor. Use ONLY the source material given below (website text if provided). Never invent facts; if something is unknown, use null or an empty list.
 
 {source_block}
-
+{scorer_hint_block(scorer_hint)}
 TASK: Return a single JSON object with EXACTLY this shape (no extra keys, no markdown fences, no commentary):
 {ENRICHMENT_SCHEMA_HINT}
 
@@ -395,6 +481,16 @@ Field rules:
   4. "end_user" for every other private company or government/public-sector organization that would use industrial tools/services in its own operations.
 - "is_competitor": true when "company_category" is "competitor", otherwise false.
 - "employee_count": approximate headcount as an integer if the source states it (e.g. "over 5,000 employees" -> 5000), otherwise null.
+- "annual_turnover": the company's annual revenue/turnover exactly as the source states it (e.g. "US$12 billion", "INR 450 crore"), or null if the source does not state one.
+- "turnover_class": the company's size by annual turnover, exactly one of "A", "B", "C", or null. {TURNOVER_BANDS} Decide in this order: (1) if "annual_turnover" is stated, convert it to US dollars and use the bands; (2) else if the source states headcount, estimate: 1,000 or more employees -> "A", 100 to 999 -> "B", under 100 -> "C"; (3) else if it is clearly a large listed or multinational group you know well, "A"; (4) otherwise null. Never guess a class for a small or unknown company.
+- "turnover_basis": how "turnover_class" was decided, exactly one of "stated" (rule 1), "estimated from headcount" (rule 2), "well-known company" (rule 3), or null when "turnover_class" is null.
+- "llm_decision": your sales verdict on whether Tritorc should pursue this company, exactly one of "accept", "review", "reject". Judge what the company itself OPERATES or is PAID TO DO, from the source text.
+  Tritorc makes controlled-bolting tools (hydraulic torque wrenches, bolt tensioners), on-site machining (flange facing, pipe cutting/beveling), tube tools (expanders, cleaners, removal), hydraulic cylinders and pumps, pipe accessories, and runs field services (bolting, retubing, hot tapping, leak sealing, hydro-testing, calibration, rentals). Its real customers: pipeline operators, refineries and petrochemical plants, fertilizer/chemical plants, power and wind operators and their maintenance contractors, steel mills, shutdown/turnaround contractors, and industrial EPC/construction contractors. A good lead OWNS or OPERATES that kind of infrastructure, or is PAID by an owner to build, bolt, machine, test or maintain it.
+  "accept" = such an operator; OR an EPC, general/design-build contractor, industrial-service contractor or OEM that builds or maintains industrial, plant, utility, water/wastewater, power or pipeline assets. A diversified contractor that lists many building types is not a restaurant or a shop: if industrial or plant work is a real part of what it does, accept.
+  "review" = a distributor or rental house for industrial tools (a possible channel partner: note any competing brands), a company where the relevant work is only incidental, or evidence too thin to judge.
+  "reject" = a competitor (makes, brands or rents the same tool categories), or a company with no industrial plant or piping work (retail, offices, software, real estate, hospitality, healthcare, schools, residential trades). Reject needs positive evidence of one of these. A thin, blocked or empty source is NOT a reason to reject: answer "review" and say the evidence was missing.
+  Three traps to avoid: (1) Client lists, past-project portfolios and sector lists (restaurants, retail, schools, hotels, roofing) do not describe what the company is; ignore them unless that is its own core work. (2) A company paid to do bolting, machining, testing or turnaround work at other companies' plants is a contractor lead even if it also supplies tools; one whose own product is the tools (makes, brands, rents, resells them) is a competitor or distributor. (3) The automated keyword scorer hint, when shown, is a blunt keyword match: never copy its reject when the text shows real industrial work, and never accept just because it scored high.
+- "llm_decision_reason": one short plain sentence naming the evidence behind "llm_decision".
 - "business_description": 2-4 factual sentences describing what the company does, grounded in the source text.
 - "key_operations": up to 8 concrete operational activities/business lines taken from the source. Prefer specific ones ("turbine maintenance", "pipeline construction") over generic ones ("consulting", "engineering").
 - "projects_or_recent_activity": at most 5 of the most notable or recent named projects, plants, contracts, expansions or news items from the source. Each as "Project/contract (client if named, scope or value if stated) (year)". Newest first. Empty list if none.
@@ -430,7 +526,7 @@ def call_groq_with_retry(client, prompt: str, max_retries: int = 4):
                     {"role": "system", "content": "You return only valid JSON. Never wrap it in markdown code fences."},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.2,
+                temperature=0,
                 max_tokens=1200,
                 response_format={"type": "json_object"},
                 reasoning_effort="low",
@@ -622,9 +718,10 @@ def enrich_company(client, company_input: str, pages: list | None = None, websit
         if is_free_email else None
     )
 
+    scorer_hint = score_pages(display_name, website, pages) if pages else None
     completion = None
     for budget in PROMPT_TEXT_BUDGET_STEPS:
-        prompt = build_prompt(display_name, website, pages, no_site_found, extra_note=extra_note, text_budget=budget)
+        prompt = build_prompt(display_name, website, pages, no_site_found, extra_note=extra_note, text_budget=budget, scorer_hint=scorer_hint)
         try:
             completion = call_groq_with_retry(client, prompt)
             break
@@ -648,14 +745,51 @@ def enrich_company(client, company_input: str, pages: list | None = None, websit
         "contacts": contacts,
         "fit": fit,
     }
-    reconcile_competitor(data, fit)
+    reconcile_competitor(data, fit, has_source=bool(pages))
     return data, pages, meta
 
 
 VALID_CATEGORIES = {"competitor", "distributor", "ECP", "end_user"}
+def _turnover_basis(raw, stated: str | None, employees) -> str:
+    """Normalize how a turnover class was decided. Tolerates the model's wording
+    ("estimated from headcount (150 employees)") and infers it from the data when
+    missing, so a valid class is never dropped over a label."""
+    text = str(raw or "").strip().lower()
+    if "stat" in text:
+        return "stated"
+    if "head" in text or "employ" in text:
+        return "estimated from headcount"
+    if "known" in text or "well" in text:
+        return "well-known company"
+    if stated:
+        return "stated"
+    if employees:
+        return "estimated from headcount"
+    return "well-known company"
 
 
-def reconcile_competitor(data: dict, fit: dict | None) -> None:
+def classify_error(exc: Exception) -> tuple[str, str]:
+    """(code, plain-language message) for a failed enrichment, so a casual
+    user never sees a raw exception."""
+    if isinstance(exc, UnsafeURLError):
+        return "blocked_url", "That address isn't a public website, so it was skipped."
+    if isinstance(exc, RuntimeError) and "GROQ_API_KEY" in str(exc):
+        return "not_configured", "The AI service isn't set up on the server. Ask an admin to add the API key."
+    if isinstance(exc, APIStatusError):
+        if exc.status_code == 429:
+            return "rate_limited", "The AI service is busy right now. Wait a minute, then press Retry."
+        if exc.status_code == 413:
+            return "too_large", "This company's pages were too long for the AI to read. Press Retry."
+        if exc.status_code in (401, 403):
+            return "not_configured", "The AI service rejected the server's key. Ask an admin to check it."
+        return "ai_error", "The AI service had a problem. Press Retry in a moment."
+    name = type(exc).__name__
+    if name in {"APIConnectionError", "APITimeoutError", "Timeout", "ReadTimeout", "ConnectTimeout", "ConnectionError"}:
+        return "ai_unreachable", "Couldn't reach a service we depend on. Check your connection and press Retry."
+    return "unknown", "Something went wrong with this company. Press Retry; if it keeps happening, tell an admin."
+
+
+def reconcile_competitor(data: dict, fit: dict | None, has_source: bool = True) -> None:
     """Keep company_category / is_competitor consistent and let either the LLM
     or the rule-based scorer mark a competitor (HYTORC, Enerpac, ...)."""
     cat = data.get("company_category")
@@ -672,6 +806,30 @@ def reconcile_competitor(data: dict, fit: dict | None) -> None:
     else:
         data["is_competitor"] = False
     data["company_category"] = cat
+    decision = str(data.get("llm_decision") or "").strip().lower()
+    if decision not in {"accept", "review", "reject"}:
+        decision = None
+    if data["is_competitor"]:
+        decision = "reject"
+        if not data.get("llm_decision_reason"):
+            data["llm_decision_reason"] = "Competitor: sells the same tool categories as Tritorc."
+    if own:
+        decision = None
+    if not has_source and decision in ("accept", "reject") and not data["is_competitor"]:
+        # no website text was read, so this is a guess from general knowledge: never a confident call
+        data["llm_decision_reason"] = "No website could be read, so this is not confirmed. " + (data.get("llm_decision_reason") or "")
+        decision = "review"
+    data["llm_decision"] = decision
+    data["llm_decision_reason"] = (data.get("llm_decision_reason") or None) if decision else None
+    tclass = str(data.get("turnover_class") or "").strip().upper()
+    stated = str(data.get("annual_turnover") or "").strip()[:80] or None
+    if tclass not in {"A", "B", "C"} or own:
+        tclass, tbasis = None, None
+    else:
+        tbasis = _turnover_basis(data.get("turnover_basis"), stated, data.get("employee_count"))
+    data["turnover_class"] = tclass
+    data["turnover_basis"] = tbasis
+    data["annual_turnover"] = stated
     emp = data.get("employee_count")
     if isinstance(emp, str):
         digits = re.sub(r"[^\d]", "", emp)
