@@ -64,6 +64,16 @@ export default function Enrichment() {
 
     const stop = () => abortRef.current?.abort();
 
+    // A row was retried, corrected ("wrong company?") or given the user's own decision.
+    const updateResult = (oldRow, rec) => {
+        setResults((prev) => prev.map((x) => (x === oldRow ? { ...rec, input: rec.input || oldRow.input } : x)));
+        loadStored();
+    };
+    const updateStored = (oldRow, rec) => {
+        setStored((prev) => ({ ...prev, items: prev.items.map((x) => (x === oldRow ? { ...x, ...rec } : x)) }));
+        loadStored();
+    };
+
     const pct = progress?.total ? Math.round(((progress.status === 'done' ? progress.index : progress.index - 1) / progress.total) * 100) : 0;
 
     return (
@@ -126,8 +136,25 @@ export default function Enrichment() {
                 {error && <div className="mt-4 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700">{error}</div>}
             </div>
 
+            <details className="group rounded-2xl border border-slate-200 bg-white px-5 py-3 text-sm text-slate-600 shadow-sm">
+                <summary className="cursor-pointer select-none font-semibold text-slate-800">How to read the results</summary>
+                <dl className="mt-3 grid gap-x-8 gap-y-2 sm:grid-cols-2">
+                    <div><dt className="font-semibold text-slate-800">LLM decision</dt><dd>The AI's call on whether Tritorc should pursue the company: <b className="text-emerald-700">Accept</b> (green row), <b className="text-yellow-700">Review</b> (light yellow row: needs a human look, also used when a website couldn't be read), <b className="text-rose-700">Reject</b> (red row). A <b className="text-orange-700">light orange row</b> means only the keyword check has seen it and scored it Weak. "Not judged" (white row) means only the keyword check has seen it; enrich it again to get the AI's call.</dd></div>
+                    <div><dt className="font-semibold text-slate-800">Crawl tier and score</dt><dd>A quick keyword check of the company's website, scored 0 to 100. It can disagree with the AI (it misses real leads when a site lists many project types). When they differ, follow the decision.</dd></div>
+                    <div><dt className="font-semibold text-slate-800">Your decision</dt><dd>Open a row and press Accept, Review or Reject to record your own call. It is marked "you", wins over the AI, and is kept when the company is enriched again.</dd></div>
+                    <div><dt className="font-semibold text-slate-800">Matched to / Wrong company?</dt><dd>When you type a name, we find its website. If it picked the wrong company, open the row, press "Wrong company?" and paste the right website.</dd></div>
+                    <div><dt className="font-semibold text-slate-800">Low confidence</dt><dd>If a website couldn't be read, the AI is guessing, so the decision is capped at Review and the row says why.</dd></div>
+                    <div><dt className="font-semibold text-slate-800">Turnover A / B / C</dt><dd>The company's size by annual turnover: A is US$100M or more, B is US$10M to under US$100M, C is under US$10M. Hover the letter to see whether it was stated on their site or estimated. Blank means there wasn't enough to say, and we don't guess.</dd></div>
+                    <div><dt className="font-semibold text-slate-800">Customer type</dt><dd>What kind of buyer it is: End User, EPC, Distributor or Competitor.</dd></div>
+                </dl>
+            </details>
+
             {results.length > 0 && (
-                <EnrichmentResults results={results} onExport={() => downloadEnrichmentXlsx(results).catch((e) => setError(e.message))} />
+                <EnrichmentResults
+                    results={results}
+                    onExport={() => downloadEnrichmentXlsx(results).catch((e) => setError(e.message))}
+                    onItemUpdate={updateResult}
+                />
             )}
 
             <section className="space-y-3">
@@ -147,7 +174,7 @@ export default function Enrichment() {
                     ) : (
                         <ul className="divide-y divide-slate-200">
                             {stored.items.map((it) => (
-                                <Row key={it.id} r={it} open={openStored === it.id} onToggle={() => setOpenStored(openStored === it.id ? null : it.id)} />
+                                <Row key={it.id} r={it} open={openStored === it.id} onToggle={() => setOpenStored(openStored === it.id ? null : it.id)} onUpdate={(rec) => updateStored(it, rec)} />
                             ))}
                         </ul>
                     )}

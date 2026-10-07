@@ -302,7 +302,7 @@ export default function MasterDatabase() {
                                                 <td className="px-6 py-4 text-sm font-semibold capitalize text-slate-700">{business.crawl_tier || 'unknown'}</td>
                                                 <td className="px-6 py-4 text-sm font-semibold capitalize text-slate-700">{business.llm_fallback_decision || '-'}</td>
                                                 <td className="px-6 py-4 text-sm text-slate-600">{business.industry_type || business.enrichment?.industry || '-'}</td>
-                                                <td className="px-6 py-4 text-sm font-medium text-slate-700">{customerTypeLabel(business.business_role)}</td>
+                                                <td className="px-6 py-4 text-sm font-medium text-slate-700">{customerTypeLabel(business.business_role, business.enrichment?.company_category)}</td>
                                                 <td className="max-w-sm px-6 py-4 text-sm text-slate-600">
                                                     {business.enrichment
                                                         ? listText(business.enrichment.projects_or_recent_activity)

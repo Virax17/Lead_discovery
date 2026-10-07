@@ -14,7 +14,88 @@ const CUSTOMER_TYPE_LABELS = {
     unknown: 'Unknown',
 };
 
-export const customerTypeLabel = (role) => CUSTOMER_TYPE_LABELS[role || 'unknown'] || 'Unknown';
+const CATEGORY_LABELS = { competitor: 'Competitor', distributor: 'Distributor', ECP: 'EPC', end_user: 'End User' };
+
+// The enrichment LLM's category (EPC, End User...) wins when present; otherwise the crawler's role.
+export const customerTypeLabel = (role, category) =>
+    CATEGORY_LABELS[category] || CUSTOMER_TYPE_LABELS[role || 'unknown'] || 'Unknown';
+
+// Accept / review / reject: the LLM's verdict when stored, otherwise derived from the crawl tier
+// so older enrichments still show something sensible.
+const VERDICT_STYLES = {
+    accept: { label: 'Accept', cls: 'bg-emerald-100 text-emerald-700' },
+    review: { label: 'Review', cls: 'bg-yellow-100 text-yellow-800' },
+    reject: { label: 'Reject', cls: 'bg-rose-100 text-rose-700' },
+    unjudged: { label: 'Not judged', cls: 'bg-slate-100 text-slate-600' },
+};
+
+export function llmVerdict(r) {
+    if (isOwnCompany(r)) return null;
+    if (['accept', 'review', 'reject'].includes(r?.override_decision)) return { key: r.override_decision, derived: false, override: true };
+    if (VERDICT_STYLES[r?.llm_decision]) return { key: r.llm_decision, derived: false };
+    if (isCompetitor(r)) return { key: 'reject', derived: true };
+    if (r?.business_role === 'supplier_distributor') return { key: 'review', derived: true };
+    const tier = r?.crawl_tier;
+    if (tier === 'best' || tier === 'strong') return { key: 'accept', derived: true };
+    // The keyword scorer alone wrongly rejects real leads (client lists, thin crawls), so a
+    // scorer-only reject is "not judged" until the LLM has looked at the company.
+    if (tier === 'reject') return { key: 'unjudged', derived: true };
+    if (tier === 'weak' || tier === 'unknown') return { key: 'review', derived: true };
+    return null;
+}
+
+// A / B / C size class by annual turnover (bands live in backend enrichment_engine.TURNOVER_BANDS).
+const TURNOVER_STYLES = {
+    A: 'bg-indigo-100 text-indigo-800',
+    B: 'bg-sky-100 text-sky-800',
+    C: 'bg-slate-100 text-slate-600',
+};
+const TURNOVER_BANDS = { A: 'US$100M or more a year', B: 'US$10M to under US$100M', C: 'under US$10M' };
+
+export function TurnoverChip({ r }) {
+    const c = r?.turnover_class;
+    if (!TURNOVER_STYLES[c]) return <span className="text-slate-300">—</span>;
+    const how = r.turnover_basis === 'stated'
+        ? `Stated on their site${r.annual_turnover ? `: ${r.annual_turnover}` : ''}`
+        : `Estimated (${r.turnover_basis || 'size'})`;
+    return (
+        <span
+            className={`inline-flex min-w-[1.75rem] justify-center rounded-full px-2.5 py-0.5 text-xs font-bold ${TURNOVER_STYLES[c]}`}
+            title={`Class ${c} = ${TURNOVER_BANDS[c]}. ${how}.`}
+        >
+            {c}
+        </span>
+    );
+}
+
+// Plain-language reason a company's website could not be read (from the stored crawl_error).
+export function crawlProblem(r) {
+    if (!r || r.error || !r.crawl_status || r.crawl_status === 'ok') return null;
+    const e = String(r.crawl_error || '').toLowerCase();
+    if (e.includes('no website')) return 'No website found for this name';
+    if (e.includes('blocked:')) return 'Skipped: not a public website';
+    if (/status (401|403|429|5\d\d)/.test(e)) return 'Their site blocks automated visits';
+    if (e.includes('error fetching')) return "Their website didn't respond";
+    return "Couldn't read their website";
+}
+
+export function VerdictChip({ r }) {
+    const v = llmVerdict(r);
+    if (!v) return <span className="text-slate-300">—</span>;
+    const s = VERDICT_STYLES[v.key];
+    return (
+        <span
+            className={`inline-flex whitespace-nowrap rounded-full px-2.5 py-0.5 text-xs font-semibold ${s.cls}`}
+            title={v.override
+                ? `Your decision${r.override_note ? `: ${r.override_note}` : ''}`
+                : r.llm_decision_reason || (v.key === 'unjudged'
+                    ? 'Only the keyword scorer has seen this company. Enrich it again to get an LLM verdict (uses the saved crawl, no re-crawl).'
+                    : v.derived ? 'Derived from the crawl tier. Enrich again for an LLM verdict.' : '')}
+        >
+            {s.label}{v.override && <span className="ml-1 text-[10px] font-medium opacity-70">you</span>}
+        </span>
+    );
+}
 
 // Competitor if the rule-based scorer OR the enrichment LLM says so.
 // Tritorc's own record is never a competitor, even though its site matches the
