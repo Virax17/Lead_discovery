@@ -1,0 +1,15 @@
+venv/
+.venv/
+.env
+.env.*
+!.env.example
+exports/
+__pycache__/
+*.pyc
+.pytest_cache/
+.git
+Dockerfile
+.dockerignore
+run_backend.bat
+run_backend.ps1
+railway.json
