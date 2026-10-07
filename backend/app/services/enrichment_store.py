@@ -18,11 +18,13 @@ from datetime import datetime, timedelta
 
 from bson import ObjectId
 from bson.errors import InvalidId
+from pymongo.errors import DuplicateKeyError
 
 from app.config.settings import settings
 from app.db.connection import get_db
 from app.services.company_cache import normalize_domain
 from app.services.crawl_scorer import SCORING_VERSION
+from app.services.seller_profiles import DEFAULT_PROFILE, get_profile
 from app.services.enrichment_engine import (
     EMPTY_RESULT,
     FREE_EMAIL_DOMAINS,
@@ -46,14 +48,18 @@ _LEGAL_SUFFIXES = re.compile(
 
 def name_key(name: str | None) -> str | None:
     """Normalized company name used for name-based lookups (case/accents/
-    punctuation/legal-suffix insensitive)."""
+    punctuation/legal-suffix insensitive). Names in non-Latin scripts keep their own
+    (case-folded) letters, so they still get a key instead of silently losing it."""
     if not name:
         return None
     s = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode().lower()
     s = re.sub(r"[^a-z0-9 ]+", " ", s)
     s = _LEGAL_SUFFIXES.sub(" ", s)
     s = re.sub(r"\s+", " ", s).strip()
-    return s or None
+    if s:
+        return s
+    u = re.sub(r"[\W_]+", " ", unicodedata.normalize("NFKC", name).casefold())
+    return re.sub(r"\s+", " ", u).strip()[:120] or None
 
 
 def _is_fresh(doc: dict) -> bool:
@@ -74,6 +80,70 @@ def serialize(doc: dict, include_pages: bool = False) -> dict:
     if include_pages:
         doc["crawled_pages"] = pages
     return doc
+
+
+FIT_KEYS = (
+    "crawl_score", "crawl_tier", "business_role", "business_role_reason", "customer_type", "crawl_reason",
+    "positive_concepts", "negative_concepts", "crawl_evidence", "crawl_evidence_urls", "detected_language",
+    "scoring_version",
+)
+PROFILE_SLOT_KEYS = (
+    "company_category", "is_competitor", "llm_decision", "llm_decision_reason",
+    "override_decision", "override_note", "override_by", "override_at",
+)
+
+
+def apply_profile(doc: dict, profile_id: str) -> dict:
+    """One company, seen through one seller's eyes. The crawl and company facts are
+    shared; the verdict, reason, "why it fits" list, competitor flag, keyword score and
+    the user's own override are that seller's. Tritorc's live at the top level (as they
+    always have); every other seller's live under `profiles.<id>`."""
+    profile = get_profile(profile_id)
+    d = dict(doc)
+    d["profile"] = profile.id
+    d["profile_name"] = profile.name
+    if profile.id == DEFAULT_PROFILE:
+        d["fit_products"] = d.get("tritorc_relevance") or []
+        d["judged_for_profile"] = bool(d.get("llm_version"))
+        d.pop("profiles", None)
+        return d
+    if not d.get("id"):  # unsaved result: already in this seller's shape
+        d["fit_products"] = d.get("fit_products") or d.get(profile.fit_key) or []
+        d["judged_for_profile"] = bool(d.get("llm_decision"))
+        return d
+    slot = (d.get("profiles") or {}).get(profile.id) or {}
+    for k in PROFILE_SLOT_KEYS:
+        d[k] = slot.get(k)
+    d["is_competitor"] = bool(slot.get("is_competitor"))
+    d["fit_products"] = slot.get("fit_products") or []
+    d["tritorc_relevance"] = d["fit_products"]  # legacy key the list and export still read
+    fit = slot.get("fit") or {}
+    for k in FIT_KEYS:  # this seller's keyword score replaces Tritorc's
+        d[k] = fit.get(k)
+    d["llm_version"] = slot.get("llm_version")
+    d["judged_for_profile"] = bool(slot.get("llm_version"))
+    d.pop("profiles", None)
+    return d
+
+
+def membership_filter(profile_id: str) -> dict:
+    """Which stored companies belong to a seller's own list. Tritorc's list is everything enriched
+    for Tritorc (including every record that predates sellers); another seller's list holds only
+    companies that have been judged for that seller. The website crawl itself is shared, but a
+    company only shows up in a seller's list, count and exports once it was enriched for them."""
+    pid = get_profile(profile_id).id
+    if pid == DEFAULT_PROFILE:
+        return {"$or": [{"profile_ids": DEFAULT_PROFILE}, {"profile_ids": {"$exists": False}}]}
+    return {"$or": [{"profile_ids": pid}, {f"profiles.{pid}.llm_version": {"$exists": True}}]}
+
+
+def _membership_ids(existing: dict | None, profile_id: str) -> list[str]:
+    """Seller lists a record should be in after `profile_id` touches it. A record from before sellers
+    existed has no `profile_ids` and counts as Tritorc's; the first time another seller adds itself the
+    field gets created, so Tritorc must be written in explicitly or the record would drop out of its list."""
+    if existing is not None and "profile_ids" not in existing and profile_id != DEFAULT_PROFILE:
+        return [DEFAULT_PROFILE, profile_id]
+    return [profile_id]
 
 
 def _is_url_or_email(entry: str) -> bool:
@@ -142,7 +212,7 @@ async def enrichment_summaries(db, docs: list[dict]) -> dict:
     projection = {field: 1 for field in ENRICHMENT_SUMMARY_FIELDS}
     projection["domain"] = 1
     found = {}
-    async for e in db[COLLECTION].find({"domain": {"$in": list(domains)}}, projection):
+    async for e in db[COLLECTION].find({"domain": {"$in": list(domains)}, **membership_filter(DEFAULT_PROFILE)}, projection):
         found[e["domain"]] = {k: e.get(k) for k in ENRICHMENT_SUMMARY_FIELDS}
     return found
 
@@ -173,7 +243,7 @@ def _oid(value) -> ObjectId | None:
         return None
 
 
-async def correct_match(client, input_text: str, website: str, wrong_id: str | None, username: str) -> dict:
+async def correct_match(client, input_text: str, website: str, wrong_id: str | None, username: str, profile: str = DEFAULT_PROFILE) -> dict:
     """The user says `input_text` was matched to the wrong company. Detach the
     typed name from the wrong record (so it can't match it again), enrich the
     website they gave, and attach the typed name to that record instead."""
@@ -185,7 +255,7 @@ async def correct_match(client, input_text: str, website: str, wrong_id: str | N
         if nkey:
             pull["name_keys"] = nkey
         await coll.update_one({"_id": wrong}, {"$pull": pull})
-    doc = await get_or_enrich(client, website, username)
+    doc = await get_or_enrich(client, website, username, profile=profile)
     right = _oid(doc.get("id"))
     if right:
         add: dict = {"input_aliases": input_text}
@@ -195,26 +265,28 @@ async def correct_match(client, input_text: str, website: str, wrong_id: str | N
     return doc
 
 
-async def set_override(doc_id: str, decision: str | None, note: str | None, username: str) -> dict | None:
+async def set_override(doc_id: str, decision: str | None, note: str | None, username: str, profile: str = DEFAULT_PROFILE) -> dict | None:
     """Record the user's own accept/review/reject call. It lives in separate
     fields, so re-enriching never overwrites it. decision=None clears it."""
     oid = _oid(doc_id)
     if not oid:
         return None
     coll = get_db()[COLLECTION]
+    profile = get_profile(profile).id
+    prefix = "" if profile == DEFAULT_PROFILE else f"profiles.{profile}."
     if decision in ("accept", "review", "reject"):
         update = {"$set": {
-            "override_decision": decision,
-            "override_note": (note or "").strip()[:300] or None,
-            "override_by": username,
-            "override_at": datetime.utcnow(),
+            f"{prefix}override_decision": decision,
+            f"{prefix}override_note": (note or "").strip()[:300] or None,
+            f"{prefix}override_by": username,
+            f"{prefix}override_at": datetime.utcnow(),
         }}
     else:
-        update = {"$unset": {"override_decision": "", "override_note": "", "override_by": "", "override_at": ""}}
+        update = {"$unset": {f"{prefix}{k}": "" for k in ("override_decision", "override_note", "override_by", "override_at")}}
     res = await coll.update_one({"_id": oid}, update)
     if res.matched_count == 0:
         return None
-    return serialize(await coll.find_one({"_id": oid}))
+    return apply_profile(serialize(await coll.find_one({"_id": oid})), profile)
 
 
 _REJUDGE_SCALARS = (
@@ -224,15 +296,11 @@ _REJUDGE_SCALARS = (
 
 async def _rejudge(client, entry: str, cached: dict) -> dict | None:
     """Re-run only the LLM on the stored pages (no crawl) to add the verdict
-    and any improved fields. Returns the updated document, or None if the LLM
-    call fails (the caller then serves the cached record unchanged)."""
+    and any improved fields. An LLM failure propagates so the caller can tell the user."""
     loop = asyncio.get_running_loop()
-    try:
-        data, _pages, meta = await loop.run_in_executor(
-            None, enrich_company, client, entry, cached["crawled_pages"], cached.get("website")
-        )
-    except Exception:
-        return None
+    data, _pages, meta = await loop.run_in_executor(
+        None, enrich_company, client, entry, cached["crawled_pages"], cached.get("website")
+    )
     now = datetime.utcnow()
     update = {k: data[k] for k in _REJUDGE_SCALARS if data.get(k) not in (None, "")}
     update.update({k: data[k] for k in ("key_operations", "projects_or_recent_activity", "tritorc_relevance") if data.get(k)})
@@ -245,25 +313,104 @@ async def _rejudge(client, entry: str, cached: dict) -> dict | None:
             "turnover_basis": data.get("turnover_basis"),
             "annual_turnover": data.get("annual_turnover"),
             "llm_version": ENRICHMENT_LLM_VERSION,
-            "llm_model": settings.groq_model,
+            "llm_model": meta.get("llm_model") or settings.groq_model,
+            "llm_provider": meta.get("llm_provider"),
             "updated_at": now,
             **meta.get("fit", {}),
         }
     )
     coll = get_db()[COLLECTION]
-    await coll.update_one({"_id": cached["_id"]}, {"$set": update, "$inc": {"hit_count": 1}})
+    await coll.update_one(
+        {"_id": cached["_id"]},
+        {"$set": update, "$inc": {"hit_count": 1}, "$addToSet": {"profile_ids": DEFAULT_PROFILE}},
+    )
     return await coll.find_one({"_id": cached["_id"]})
 
 
-async def get_or_enrich(client, entry: str, username: str, force_refresh: bool = False) -> dict:
-    """cache -> (crawl + LLM) -> store. Result carries `cache_hit`."""
+_GENERIC_SCALARS = ("country", "hq_city", "hq_address", "industry", "business_description", "employee_count")
+
+
+def _profile_slot(data: dict, meta: dict) -> dict:
+    """What one seller's judgement of a company looks like when stored."""
+    return {
+        "company_category": data.get("company_category"),
+        "is_competitor": bool(data.get("is_competitor")),
+        "llm_decision": data.get("llm_decision"),
+        "llm_decision_reason": data.get("llm_decision_reason"),
+        "fit_products": data.get("fit_products") or [],
+        "fit": meta.get("fit", {}),
+        "llm_version": ENRICHMENT_LLM_VERSION,
+        "llm_model": meta.get("llm_model") or settings.groq_model,
+        "llm_provider": meta.get("llm_provider"),
+        "judged_at": datetime.utcnow(),
+    }
+
+
+async def _judge_profile(client, entry: str, cached: dict, profile_id: str) -> dict | None:
+    """Judge a stored company for another seller (e.g. Ozat) from its saved pages:
+    no crawl, one LLM call. Existing facts and the user's override are kept."""
+    loop = asyncio.get_running_loop()
+    data, _pages, meta = await loop.run_in_executor(
+        None, enrich_company, client, entry, cached["crawled_pages"], cached.get("website"), profile_id
+    )
+    update = {f"profiles.{profile_id}.{k}": v for k, v in _profile_slot(data, meta).items()}
+    for k in _GENERIC_SCALARS:  # only fill company facts the first run left empty
+        if cached.get(k) in (None, "") and data.get(k) not in (None, ""):
+            update[k] = data[k]
+    for k in ("key_operations", "projects_or_recent_activity"):
+        if not cached.get(k) and data.get(k):
+            update[k] = data[k]
+    if not cached.get("turnover_class") and data.get("turnover_class"):
+        update.update({k: data.get(k) for k in ("turnover_class", "turnover_basis", "annual_turnover")})
+    update["updated_at"] = datetime.utcnow()
+    coll = get_db()[COLLECTION]
+    await coll.update_one(
+        {"_id": cached["_id"]},
+        {"$set": update, "$inc": {"hit_count": 1}, "$addToSet": {"profile_ids": {"$each": _membership_ids(cached, profile_id)}}},
+    )
+    return await coll.find_one({"_id": cached["_id"]})
+
+
+_COMPANY_LOCKS: dict[str, list] = {}  # key -> [lock, number of requests using it]
+
+
+async def get_or_enrich(client, entry: str, username: str, force_refresh: bool = False, profile: str = DEFAULT_PROFILE) -> dict:
+    """One request per company at a time: if the same company is requested again while it is being crawled
+    (two tabs, two sellers, a repeated name), the second waits and then finds the saved result instead of crawling again."""
+    entry = entry.strip()
+    key = input_domain(entry) or name_key(entry) or entry.lower()
+    slot = _COMPANY_LOCKS.setdefault(key, [asyncio.Lock(), 0])
+    slot[1] += 1
+    try:
+        async with slot[0]:
+            return await _get_or_enrich(client, entry, username, force_refresh, profile)
+    finally:
+        slot[1] -= 1
+        if slot[1] <= 0:
+            _COMPANY_LOCKS.pop(key, None)
+
+
+async def _get_or_enrich(client, entry: str, username: str, force_refresh: bool = False, profile: str = DEFAULT_PROFILE) -> dict:
+    """cache -> (crawl + LLM) -> store, seen as `profile` (the seller we are judging for).
+    The crawl is shared by every profile, so judging a known company for a second
+    seller costs one LLM call and no crawl. Result carries `cache_hit`."""
+    profile = get_profile(profile).id
     entry = entry.strip()
     cached = None if force_refresh else await _lookup_for_input(entry)
-    if cached and _is_fresh(cached) and cached.get("crawled_pages") and cached.get("llm_version") != ENRICHMENT_LLM_VERSION:
-        rejudged = await _rejudge(client, entry, cached)
-        if rejudged:
-            return {**serialize(rejudged), "cache_hit": True, "rejudged": True}
-    if cached and _is_fresh(cached):
+    fresh = bool(cached) and _is_fresh(cached)
+
+    if fresh and cached.get("crawled_pages"):
+        if profile == DEFAULT_PROFILE:
+            needs_judging = cached.get("llm_version") != ENRICHMENT_LLM_VERSION
+            judged = await _rejudge(client, entry, cached) if needs_judging else None
+        else:
+            slot = (cached.get("profiles") or {}).get(profile) or {}
+            needs_judging = slot.get("llm_version") != ENRICHMENT_LLM_VERSION
+            judged = await _judge_profile(client, entry, cached, profile) if needs_judging else None
+        if judged:
+            return {**apply_profile(serialize(judged), profile), "cache_hit": True, "rejudged": True}
+
+    if fresh:
         update: dict = {"$inc": {"hit_count": 1}}
         if cached.get("scoring_version") != SCORING_VERSION and cached.get("crawled_pages"):
             # scorer changed since this was stored: re-score the saved pages (no crawl)
@@ -271,15 +418,18 @@ async def get_or_enrich(client, entry: str, username: str, force_refresh: bool =
             cached.update(fit)
             update["$set"] = fit
         await get_db()[COLLECTION].update_one({"_id": cached["_id"]}, update)
-        return {**serialize(cached), "cache_hit": True}
+        return {**apply_profile(serialize(cached), profile), "cache_hit": True}
 
     loop = asyncio.get_running_loop()
-    data, pages, meta = await loop.run_in_executor(None, enrich_company, client, entry)
-    return {**await _save(entry, username, data, pages, meta), "cache_hit": False}
+    data, pages, meta = await loop.run_in_executor(None, enrich_company, client, entry, None, None, profile)
+    saved = await _save(entry, username, data, pages, meta, profile)
+    return {**apply_profile(saved, profile), "cache_hit": False}
 
 
-async def _save(entry: str, username: str, data: dict, pages: list, meta: dict) -> dict:
+async def _save(entry: str, username: str, data: dict, pages: list, meta: dict, profile_id: str = DEFAULT_PROFILE) -> dict:
     coll = get_db()[COLLECTION]
+    profile_id = get_profile(profile_id).id
+    is_default = profile_id == DEFAULT_PROFILE
     now = datetime.utcnow()
     domain = normalize_domain(data.get("website") or "")
     if domain in FREE_EMAIL_DOMAINS:
@@ -296,37 +446,65 @@ async def _save(entry: str, username: str, data: dict, pages: list, meta: dict) 
 
     fields = {
         **{k: data.get(k) for k in (
-            "company_name", "website", "country", "hq_city", "hq_address", "industry", "company_category",
-            "business_description", "employee_count", "llm_decision", "llm_decision_reason",
+            "company_name", "website", "country", "hq_city", "hq_address", "industry",
+            "business_description", "employee_count",
             "turnover_class", "turnover_basis", "annual_turnover",
         )},
-        "is_competitor": bool(data.get("is_competitor")),
-        "llm_version": ENRICHMENT_LLM_VERSION,
         "contact_emails": meta["contacts"]["emails"],
         "contact_phones": meta["contacts"]["phones"],
         "social_links": meta["contacts"]["social_links"],
-        **meta.get("fit", {}),
-        **{k: data.get(k) or [] for k in ("key_operations", "projects_or_recent_activity", "tritorc_relevance")},
+        # company-level crawl_* fields are always the Tritorc scorer's; other sellers' scores live in their slot
+        **(meta.get("fit", {}) if is_default else meta.get("fit_default", {})),
+        **{k: data.get(k) or [] for k in ("key_operations", "projects_or_recent_activity")},
         "domain": domain,
         "crawled_pages": pages,
         "crawl_status": meta["crawl_status"],
         "crawl_error": meta["crawl_error"],
         "crawl_version": ENRICHMENT_CRAWL_VERSION,
         "last_crawled_at": now,
-        "llm_model": settings.groq_model,
+        "llm_model": meta.get("llm_model") or settings.groq_model,
+        "llm_provider": meta.get("llm_provider"),
         "enriched_at": now,
         "updated_at": now,
     }
-    await coll.update_one(
-        {"cache_key": key},
-        {
-            "$set": fields,
-            "$addToSet": {
-                "input_aliases": entry,
-                "name_keys": {"$each": [k for k in (nkey, entry_key, domain_stem) if k]},
-            },
-            "$setOnInsert": {"created_by": username, "created_at": now, "hit_count": 0, "place_ids": []},
+    existing = await coll.find_one({"cache_key": key}, {"profile_ids": 1, "llm_version": 1, "profiles": 1})
+    on_insert = {"created_by": username, "created_at": now, "hit_count": 0, "place_ids": []}
+    if is_default:
+        fields.update({
+            "company_category": data.get("company_category"),
+            "is_competitor": bool(data.get("is_competitor")),
+            "llm_decision": data.get("llm_decision"),
+            "llm_decision_reason": data.get("llm_decision_reason"),
+            "llm_version": ENRICHMENT_LLM_VERSION,
+            "tritorc_relevance": data.get("tritorc_relevance") or [],
+        })
+    else:
+        # another seller's judgement goes in its own slot; Tritorc's top-level judgement is left untouched
+        fields.update({f"profiles.{profile_id}.{k}": v for k, v in _profile_slot(data, meta).items()})
+        on_insert.update({
+            "company_category": None, "is_competitor": False, "llm_decision": None,
+            "llm_decision_reason": None, "llm_version": None, "tritorc_relevance": [],
+        })
+    # this crawl replaced the shared facts, so every OTHER seller's earlier verdict was based on the old crawl:
+    # mark it stale and it is re-judged from the new pages (no re-crawl) the next time that company is opened
+    if existing:
+        if not is_default and existing.get("llm_version"):
+            fields["llm_version"] = "stale"
+        for other_id, slot_doc in (existing.get("profiles") or {}).items():
+            if other_id != profile_id and isinstance(slot_doc, dict) and slot_doc.get("llm_version"):
+                fields[f"profiles.{other_id}.llm_version"] = "stale"
+    update = {
+        "$set": fields,
+        "$addToSet": {
+            "input_aliases": entry,
+            "name_keys": {"$each": [k for k in (nkey, entry_key, domain_stem) if k]},
+            "profile_ids": {"$each": _membership_ids(existing, profile_id)},
         },
-        upsert=True,
-    )
+        "$setOnInsert": on_insert,
+    }
+    try:
+        await coll.update_one({"cache_key": key}, update, upsert=True)
+    except DuplicateKeyError:
+        # another request inserted the same company between our read and write: the document exists now, so just update it
+        await coll.update_one({"cache_key": key}, update, upsert=True)
     return serialize(await coll.find_one({"cache_key": key}))

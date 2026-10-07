@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { AlertTriangle, ChevronDown, ChevronRight, Download, Database, ExternalLink, Loader2, MapPin, RefreshCw, Search as SearchIcon } from 'lucide-react';
-import { CompetitorBadge, TurnoverChip, VerdictChip, crawlProblem, customerTypeLabel, llmVerdict } from './leadShared';
+import { asList, safeHref, CompetitorBadge, TurnoverChip, VerdictChip, crawlProblem, customerTypeLabel, llmVerdict } from './leadShared';
 import { correctEnrichment, enrichSingle, setEnrichmentOverride } from '../api';
 
 const CATEGORY_LABELS = { competitor: 'Competitor', distributor: 'Distributor', ECP: 'EPC / Contractor', end_user: 'End user' };
@@ -97,7 +97,7 @@ const linkCls = 'text-blue-600 hover:underline';
 
 function FactsCard({ r }) {
     const loc = [r.hq_city, r.country].filter(Boolean).join(', ');
-    const socials = Object.entries(r.social_links || {});
+    const socials = Object.entries(r.social_links && typeof r.social_links === 'object' ? r.social_links : {}).filter(([, v]) => safeHref(v));
     const turnover = r.turnover_class
         ? `Class ${r.turnover_class}${r.annual_turnover ? ` (${r.annual_turnover})` : ''}${r.turnover_basis === 'stated' ? '' : ` · estimated from ${String(r.turnover_basis || 'size').replace('estimated from ', '')}`}`
         : null;
@@ -109,16 +109,16 @@ function FactsCard({ r }) {
             <FactRow label="Turnover">{turnover}</FactRow>
             <FactRow label="Employees">{r.employee_count ? `About ${r.employee_count.toLocaleString()}` : null}</FactRow>
             <FactRow label="Email">
-                {r.contact_emails?.length ? <div className="space-y-0.5">{r.contact_emails.map((e) => <div key={e}><a href={`mailto:${e}`} className={linkCls}>{e}</a></div>)}</div> : null}
+                {asList(r.contact_emails).length ? <div className="space-y-0.5">{asList(r.contact_emails).map((e) => <div key={e}><a href={`mailto:${e}`} className={linkCls}>{e}</a></div>)}</div> : null}
             </FactRow>
             <FactRow label="Phone">
-                {r.contact_phones?.length ? <div className="space-y-0.5">{r.contact_phones.map((p) => <div key={p}><a href={`tel:${p.replace(/\s+/g, '')}`} className={linkCls}>{p}</a></div>)}</div> : null}
+                {asList(r.contact_phones).length ? <div className="space-y-0.5">{asList(r.contact_phones).map((p) => <div key={p}><a href={`tel:${p.replace(/\s+/g, '')}`} className={linkCls}>{p}</a></div>)}</div> : null}
             </FactRow>
             <FactRow label="Website">
-                {r.website ? <a href={r.website} target="_blank" rel="noreferrer" className={`inline-flex items-center gap-1 ${linkCls}`}>{r.domain || r.website} <ExternalLink className="h-3 w-3" /></a> : null}
+                {safeHref(r.website) ? <a href={safeHref(r.website)} target="_blank" rel="noreferrer" className={`inline-flex items-center gap-1 ${linkCls}`}>{r.domain || r.website} <ExternalLink className="h-3 w-3" /></a> : null}
             </FactRow>
             <FactRow label="Social">
-                {socials.length ? <div className="flex flex-wrap gap-x-3">{socials.map(([k, v]) => <a key={k} href={v} target="_blank" rel="noreferrer" className={`capitalize ${linkCls}`}>{k}</a>)}</div> : null}
+                {socials.length ? <div className="flex flex-wrap gap-x-3">{socials.map(([k, v]) => <a key={k} href={safeHref(v)} target="_blank" rel="noreferrer" className={`capitalize ${linkCls}`}>{k}</a>)}</div> : null}
             </FactRow>
         </dl>
     );
@@ -132,13 +132,13 @@ const BANNERS = {
 };
 
 // The answer first: decision, the reason in one sentence, and the two facts people ask next.
-function VerdictBanner({ r }) {
+function VerdictBanner({ r, onUpdate }) {
     const v = llmVerdict(r);
     if (!v) return null;
     const b = BANNERS[v.key];
     const reason = v.override
         ? (r.override_note || 'You made this decision yourself.')
-        : r.llm_decision_reason || (v.key === 'unjudged' ? "Press Enrich on this company again to get the AI's decision. It reuses the saved crawl." : null);
+        : r.llm_decision_reason || (v.key === 'unjudged' ? `The AI hasn't judged this company for ${r.profile_name || 'Tritorc'} yet. It reuses the saved crawl, so it only takes a moment.` : null);
     return (
         <div className={`rounded-xl border p-4 ${b.box}`}>
             <div className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
@@ -146,6 +146,9 @@ function VerdictBanner({ r }) {
                 <span className={`text-sm font-medium opacity-80 ${b.text}`}>{v.override ? 'Your decision' : b.sub}</span>
             </div>
             {reason && <p className="mt-2 text-[15px] leading-relaxed text-slate-800">{reason}</p>}
+            {v.key === 'unjudged' && r.profile_name && onUpdate && (
+                <div className="mt-3"><RetryButton r={r} onUpdate={onUpdate} label={`Get the ${r.profile_name} decision`} /></div>
+            )}
             <div className="mt-2.5 flex flex-wrap items-center gap-x-5 gap-y-1 text-sm text-slate-600">
                 <span>Customer type <b className="font-semibold text-slate-800">{customerTypeLabel(r.business_role, r.company_category)}</b></span>
                 {r.turnover_class && <span>Turnover class <b className="font-semibold text-slate-800">{r.turnover_class}</b></span>}
@@ -169,8 +172,8 @@ function CrawlerDetails({ r }) {
                 {r.crawl_reason && <p>{r.crawl_reason}</p>}
                 {r.crawl_evidence?.length > 0 && (
                     <ul className="list-disc space-y-1 pl-5">
-                        {r.crawl_evidence.map((ev, i) => (
-                            <li key={i}>{ev}{r.crawl_evidence_urls?.[i] && <> <a href={r.crawl_evidence_urls[i]} target="_blank" rel="noreferrer" className={linkCls}>source</a></>}</li>
+                        {asList(r.crawl_evidence).map((ev, i) => (
+                            <li key={i}>{ev}{safeHref(r.crawl_evidence_urls?.[i]) && <> <a href={safeHref(r.crawl_evidence_urls[i])} target="_blank" rel="noreferrer" className={linkCls}>source</a></>}</li>
                         ))}
                     </ul>
                 )}
@@ -197,7 +200,7 @@ function MatchPanel({ r, onUpdate }) {
         setBusy(true);
         setErr('');
         try {
-            const rec = await correctEnrichment({ input: r.input || r.input_aliases?.[0] || r.company_name, website: site.trim(), wrongId: r.id });
+            const rec = await correctEnrichment({ input: r.input || r.input_aliases?.[0] || r.company_name, website: site.trim(), wrongId: r.id, profile: r.profile });
             onUpdate?.({ ...rec, cache_hit: false });
         } catch (e) {
             setErr(e.message);
@@ -208,7 +211,7 @@ function MatchPanel({ r, onUpdate }) {
     return (
         <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-600">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                <span>Matched to <a href={r.website} target="_blank" rel="noreferrer" className="font-semibold text-blue-600 hover:underline">{r.domain}</a></span>
+                <span>Matched to <a href={safeHref(r.website)} target="_blank" rel="noreferrer" className="font-semibold text-blue-600 hover:underline">{r.domain}</a></span>
                 {!open && <button type="button" onClick={() => setOpen(true)} className="text-xs font-semibold text-slate-500 underline hover:text-slate-800">Wrong company?</button>}
             </div>
             {open && (
@@ -240,7 +243,7 @@ function DecisionPanel({ r, onUpdate }) {
         setBusy(true);
         setErr('');
         try {
-            const rec = await setEnrichmentOverride({ id: r.id, decision, note });
+            const rec = await setEnrichmentOverride({ id: r.id, decision, note, profile: r.profile });
             if (!decision) setNote('');
             onUpdate?.({ ...r, ...rec });
         } catch (e) {
@@ -279,14 +282,14 @@ function DecisionPanel({ r, onUpdate }) {
     );
 }
 
-function RetryButton({ r, onUpdate }) {
+function RetryButton({ r, onUpdate, label = 'Retry' }) {
     const [busy, setBusy] = useState(false);
     const [err, setErr] = useState('');
     const retry = async () => {
         setBusy(true);
         setErr('');
         try {
-            const rec = await enrichSingle({ companyName: r.input || r.company_name });
+            const rec = await enrichSingle({ companyName: r.input || r.company_name, website: r.error ? undefined : r.website, profile: r.profile });
             onUpdate?.(rec);
         } catch (e) {
             setErr(e.message);
@@ -297,7 +300,7 @@ function RetryButton({ r, onUpdate }) {
     return (
         <div className="flex flex-col items-end gap-1">
             <button type="button" onClick={retry} disabled={busy} className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-semibold text-amber-800 hover:bg-amber-100 disabled:opacity-60">
-                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}{busy ? 'Trying again…' : 'Retry'}
+                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}{busy ? 'Working…' : label}
             </button>
             {err && <span className="max-w-xs text-right text-xs text-rose-600">{err}</span>}
         </div>
@@ -308,17 +311,18 @@ function Detail({ r, onUpdate }) {
     const [showAll, setShowAll] = useState(false);
     const desc = r.business_description || '';
     const long = desc.length > 330;
+    const fit = asList(r.fit_products || r.tritorc_relevance);
 
     return (
         <div className="border-t border-black/10 bg-white px-5 py-6">
             <div className="grid gap-6 lg:grid-cols-[minmax(0,1.7fr)_minmax(0,1fr)]">
                 <div className="min-w-0 space-y-8">
-                    <VerdictBanner r={r} />
+                    <VerdictBanner r={r} onUpdate={onUpdate} />
 
-                    {r.tritorc_relevance?.length > 0 && (
-                        <Section title="Why it fits Tritorc" hint={`${r.tritorc_relevance.length} product${r.tritorc_relevance.length > 1 ? 's' : ''}`}>
+                    {fit.length > 0 && (
+                        <Section title={`Why it fits ${r.profile_name || 'Tritorc'}`} hint={`${fit.length} product${fit.length > 1 ? 's' : ''}`}>
                             <ul className="space-y-2">
-                                {r.tritorc_relevance.map((t, i) => <FitCard key={i} text={t} />)}
+                                {fit.map((t, i) => <FitCard key={i} text={t} />)}
                             </ul>
                         </Section>
                     )}
@@ -337,7 +341,7 @@ function Detail({ r, onUpdate }) {
                     {r.projects_or_recent_activity?.length > 0 && (
                         <Section title="Recent projects" hint={`${r.projects_or_recent_activity.length}`}>
                             <ul className="space-y-3 border-l-2 border-slate-100 pl-4">
-                                {r.projects_or_recent_activity.map((p, i) => <ProjectItem key={i} text={p} />)}
+                                {asList(r.projects_or_recent_activity).map((p, i) => <ProjectItem key={i} text={p} />)}
                             </ul>
                         </Section>
                     )}
@@ -345,7 +349,7 @@ function Detail({ r, onUpdate }) {
                     {r.key_operations?.length > 0 && (
                         <Section title="What they do">
                             <div className="flex flex-wrap gap-2">
-                                {r.key_operations.map((o, i) => (
+                                {asList(r.key_operations).map((o, i) => (
                                     <span key={i} className="rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-700">{o}</span>
                                 ))}
                             </div>
@@ -411,9 +415,9 @@ export function Row({ r, open, onToggle, onUpdate }) {
     }
     const loc = [r.hq_city, r.country].filter(Boolean).join(', ');
     const address = r.hq_address || loc;
-    const firstFit = r.tritorc_relevance?.[0];
+    const firstFit = (r.fit_products || r.tritorc_relevance)?.[0];
     const [fitProduct] = firstFit ? String(firstFit).split(/\s[—–-]\s/) : [];
-    const firstProject = r.projects_or_recent_activity?.[0];
+    const firstProject = asList(r.projects_or_recent_activity)[0];
     const tone = rowTone(r);
     const problem = crawlProblem(r);
     const nameBased = !!r.input && !/[./@]/.test(r.input);
