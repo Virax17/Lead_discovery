@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from app.api.auth import get_current_user
 from app.db.connection import get_db
 from app.services.enrichment_engine import get_groq_client, parse_companies_file
-from app.services.enrichment_store import COLLECTION, find_enrichment, get_or_enrich, serialize
+from app.services.enrichment_store import COLLECTION, find_enrichment, get_or_enrich
 
 router = APIRouter(prefix="/enrichment", tags=["enrichment"])
 
@@ -104,11 +104,18 @@ async def list_enrichments(
         flt["$or"] = [{"company_name": rx}, {"domain": rx}, {"industry": rx}, {"country": rx}]
     coll = get_db()[COLLECTION]
     total = await coll.count_documents(flt)
-    cursor = coll.find(flt, {"crawled_pages": 0}).sort("updated_at", -1).skip(skip).limit(limit)
+    pipeline = [
+        {"$match": flt},
+        {"$sort": {"updated_at": -1}},
+        {"$skip": skip},
+        {"$limit": limit},
+        {"$addFields": {"pages_crawled": {"$size": {"$ifNull": ["$crawled_pages", []]}}}},
+        {"$project": {"crawled_pages": 0}},
+    ]
     items = []
-    async for doc in cursor:
-        doc["crawled_pages"] = []
-        items.append(serialize(doc))
+    async for doc in coll.aggregate(pipeline):
+        doc["id"] = str(doc.pop("_id"))
+        items.append(doc)
     return {"total": total, "items": items}
 
 

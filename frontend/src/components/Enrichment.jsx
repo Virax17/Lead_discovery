@@ -18,6 +18,24 @@ function CategoryChip({ value }) {
     );
 }
 
+const TIER_STYLES = {
+    best: 'bg-emerald-100 text-emerald-700',
+    strong: 'bg-blue-100 text-blue-700',
+    weak: 'bg-amber-100 text-amber-700',
+    reject: 'bg-rose-100 text-rose-700',
+    unknown: 'bg-slate-100 text-slate-600',
+};
+
+const ROLE_LABELS = {
+    end_user_operator: 'End-user operator',
+    industrial_service_contractor: 'Service contractor',
+    epc_contractor: 'EPC contractor',
+    supplier_distributor: 'Supplier / distributor',
+    competitor_manufacturer: 'Competitor',
+    generic_local_service: 'Generic service',
+    unknown: 'Unknown role',
+};
+
 function ListBlock({ title, items }) {
     if (!items?.length) return null;
     return (
@@ -52,15 +70,51 @@ function CompanyCard({ r }) {
                 </div>
             </div>
             <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-slate-500">
-                {r.country && <span>{r.country}</span>}
+                {(r.hq_city || r.country) && <span>{[r.hq_city, r.country].filter(Boolean).join(', ')}</span>}
                 {r.industry && <span>{r.industry}</span>}
             </div>
+            {r.crawl_tier && (
+                <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+                    <span className={`inline-flex rounded-full px-2.5 py-0.5 font-semibold capitalize ${TIER_STYLES[r.crawl_tier] || TIER_STYLES.unknown}`}>
+                        Fit: {r.crawl_tier}{r.crawl_score != null ? ` · ${r.crawl_score}` : ''}
+                    </span>
+                    {r.business_role && <span className="rounded-full bg-slate-100 px-2.5 py-0.5 font-semibold text-slate-600">{ROLE_LABELS[r.business_role] || r.business_role}</span>}
+                    {r.business_role_reason && <span className="text-slate-500">{r.business_role_reason}</span>}
+                </div>
+            )}
             {r.business_description && <p className="mt-3 text-sm text-slate-700">{r.business_description}</p>}
             <div className="mt-4 grid gap-4 md:grid-cols-3">
                 <ListBlock title="Key operations" items={r.key_operations} />
                 <ListBlock title="Projects & activity" items={r.projects_or_recent_activity} />
                 <ListBlock title="Tritorc relevance" items={r.tritorc_relevance} />
             </div>
+            {(r.contact_emails?.length > 0 || r.contact_phones?.length > 0 || r.hq_address || Object.keys(r.social_links || {}).length > 0) && (
+                <div className="mt-4 rounded-lg bg-slate-50 p-3 text-sm text-slate-700">
+                    <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Contact</div>
+                    <div className="mt-1 space-y-0.5">
+                        {r.hq_address && <div>{r.hq_address}</div>}
+                        {r.contact_emails?.length > 0 && <div>{r.contact_emails.join(', ')}</div>}
+                        {r.contact_phones?.length > 0 && <div>{r.contact_phones.join(', ')}</div>}
+                        {Object.keys(r.social_links || {}).length > 0 && (
+                            <div className="flex flex-wrap gap-3">
+                                {Object.entries(r.social_links).map(([k, v]) => (
+                                    <a key={k} href={v} target="_blank" rel="noreferrer" className="capitalize text-blue-600 hover:underline">{k}</a>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
+            {r.crawl_evidence?.length > 0 && (
+                <details className="mt-3 text-sm text-slate-600">
+                    <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-slate-500">Fit evidence ({r.crawl_evidence.length})</summary>
+                    <ul className="mt-2 list-disc space-y-1 pl-5">
+                        {r.crawl_evidence.map((ev, i) => (
+                            <li key={i}>{ev}{r.crawl_evidence_urls?.[i] && <> <a href={r.crawl_evidence_urls[i]} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">source</a></>}</li>
+                        ))}
+                    </ul>
+                </details>
+            )}
         </div>
     );
 }

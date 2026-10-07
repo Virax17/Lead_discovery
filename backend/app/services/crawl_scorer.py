@@ -558,6 +558,24 @@ async def crawl_business_website(details: PlaceDetails, max_pages: int = MAX_PAG
     if not root_url:
         return score_crawl(details, [])
 
+    # Reuse a stored Company Enrichment crawl (same site, still fresh) instead
+    # of fetching it again; falls through to a live crawl on any miss/error.
+    try:
+        from app.services.enrichment_store import get_cached_pages
+
+        stored = await get_cached_pages(root_url)
+    except Exception as exc:
+        await log_error(search_id=None, stage="enrichment_cache", place_id=None, error_message=str(exc))
+        stored = None
+    if stored and len(stored) >= 2:
+        reused = score_crawl(
+            details,
+            [CrawledPage(url=p["url"], title=p.get("title", ""), text=p.get("text", "")) for p in stored][:max_pages],
+        )
+        if reused.status == "crawled":
+            reused.reason = f"{reused.reason} Reused stored enrichment crawl ({reused.pages_checked} page(s))."
+            return reused
+
     root_netloc = urlparse(root_url).netloc
     crawled: list[CrawledPage] = []
     queued: set[str] = {root_url}

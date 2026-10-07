@@ -5,6 +5,7 @@ from typing import List, Optional
 from app.api.auth import get_current_user
 from app.config.countries import normalize_country
 from app.db.connection import get_db
+from app.services.company_cache import normalize_domain
 from app.services.country_maintenance import normalize_all_countries
 from app.services.export_engine import export_country
 from app.services.storage import s3_enabled, local_path, presigned_url
@@ -36,6 +37,29 @@ async def list_populated_countries(current_user: str = Depends(get_current_user)
         }
         for d in docs
     ]
+
+
+ENRICHMENT_SUMMARY_FIELDS = (
+    "company_name", "business_description", "country", "hq_city", "hq_address", "industry",
+    "company_category", "tritorc_relevance", "key_operations", "contact_emails", "contact_phones",
+    "social_links", "crawl_tier", "crawl_score", "business_role",
+)
+
+
+async def _enrichment_summaries(db, docs: list[dict]) -> dict:
+    """LLM-enriched profile (description, HQ, Tritorc relevance, contacts) for
+    the page's businesses that have been through Company Enrichment, keyed by
+    domain. One query for the whole page; crawled page text is not loaded."""
+    domains = {normalize_domain(d.get("website") or "") for d in docs}
+    domains.discard(None)
+    if not domains:
+        return {}
+    projection = {field: 1 for field in ENRICHMENT_SUMMARY_FIELDS}
+    projection["domain"] = 1
+    found = {}
+    async for e in db.company_enrichments.find({"domain": {"$in": list(domains)}}, projection):
+        found[e["domain"]] = {k: e.get(k) for k in ENRICHMENT_SUMMARY_FIELDS}
+    return found
 
 
 @router.get("")
@@ -71,10 +95,12 @@ async def list_businesses(
     )
     docs = await cursor.to_list(length=PAGE_SIZE)
 
+    enrichments = await _enrichment_summaries(db, docs)
     businesses = []
     for d in docs:
         d["id"] = str(d["_id"])
         del d["_id"]
+        d["enrichment"] = enrichments.get(normalize_domain(d.get("website") or ""))
         businesses.append(d)
 
     return {

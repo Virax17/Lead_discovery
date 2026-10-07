@@ -11,6 +11,9 @@ const DEFAULT_COLUMNS = [
     { key: 'address', label: 'Address' },
     { key: 'website', label: 'Website' },
     { key: 'phone_number', label: 'Phone Number' },
+    { key: 'enriched_summary', label: 'Enriched Summary' },
+    { key: 'enriched_relevance', label: 'Tritorc Relevance' },
+    { key: 'enriched_contacts', label: 'Contact Emails' },
     { key: 'crawl_tier', label: 'Crawl Tier' },
     { key: 'business_role', label: 'Business Role' },
     { key: 'llm_fallback_decision', label: 'LLM Fallback Decision' },
@@ -290,6 +293,9 @@ export default function MasterDatabase() {
                                                     {business.website ? <a href={business.website} target="_blank" rel="noreferrer">Website</a> : '-'}
                                                 </td>
                                                 <td className="px-6 py-4 text-sm text-slate-600">{business.phone_number || '-'}</td>
+                                                <td className="max-w-sm px-6 py-4 text-sm text-slate-600">{business.enrichment?.business_description || '-'}</td>
+                                                <td className="max-w-sm px-6 py-4 text-sm text-slate-600">{formatEvidence(business.enrichment?.tritorc_relevance)}</td>
+                                                <td className="max-w-xs px-6 py-4 text-sm text-slate-600">{(business.enrichment?.contact_emails || []).join(', ') || '-'}</td>
                                                 <td className="px-6 py-4 text-sm font-semibold capitalize text-slate-700">{business.crawl_tier || 'unknown'}</td>
                                                 <td className="px-6 py-4 text-sm font-medium text-slate-700">{business.business_role || '-'}</td>
                                                 <td className="px-6 py-4 text-sm font-semibold capitalize text-slate-700">{business.llm_fallback_decision || '-'}</td>

@@ -19,16 +19,19 @@ from datetime import datetime, timedelta
 from app.config.settings import settings
 from app.db.connection import get_db
 from app.services.company_cache import normalize_domain
+from app.services.crawl_scorer import SCORING_VERSION
 from app.services.enrichment_engine import (
     EMPTY_RESULT,
     FREE_EMAIL_DOMAINS,
     enrich_company,
+    score_pages,
     normalize_if_url,
     resolve_from_email,
 )
 
 COLLECTION = "company_enrichments"
-ENRICHMENT_CRAWL_VERSION = "enrichment-crawl-v1"
+# v2: 8-page crawl (contact/about first), contacts + HQ extraction, fit scoring.
+ENRICHMENT_CRAWL_VERSION = "enrichment-crawl-v2"
 
 _LEGAL_SUFFIXES = re.compile(
     r"\b(inc|incorporated|llc|ltd|limited|plc|corp|corporation|co|company|gmbh|ag|sa|sdn|bhd|pvt|pte|llp|bv|nv|oy|ab|as|spa|srl|se|kg|nv|pty)\b"
@@ -50,6 +53,9 @@ def name_key(name: str | None) -> str | None:
 def _is_fresh(doc: dict) -> bool:
     ts = doc.get("last_crawled_at")
     if not ts or doc.get("crawl_status") != "ok":
+        return False
+    # an older crawl format lacks contacts/HQ -- recrawl once to upgrade it
+    if doc.get("crawl_version") != ENRICHMENT_CRAWL_VERSION:
         return False
     return ts > datetime.utcnow() - timedelta(days=settings.enrichment_cache_max_age_days)
 
@@ -102,9 +108,12 @@ async def get_cached_pages(domain: str) -> list[dict] | None:
     """Crawled page text for a domain if a fresh successful crawl exists, so
     callers can score/extract without fetching the site again."""
     doc = await get_db()[COLLECTION].find_one({"domain": normalize_domain(domain) or domain.lower()})
-    if doc and _is_fresh(doc) and doc.get("crawled_pages"):
-        return doc["crawled_pages"]
-    return None
+    if not doc or not doc.get("crawled_pages") or doc.get("crawl_status") != "ok":
+        return None
+    ts = doc.get("last_crawled_at")
+    if not ts or ts < datetime.utcnow() - timedelta(days=settings.enrichment_cache_max_age_days):
+        return None
+    return doc["crawled_pages"]
 
 
 async def link_place_id(domain: str, place_id: str) -> None:
@@ -131,7 +140,13 @@ async def get_or_enrich(client, entry: str, username: str, force_refresh: bool =
     entry = entry.strip()
     cached = None if force_refresh else await _lookup_for_input(entry)
     if cached and _is_fresh(cached):
-        await get_db()[COLLECTION].update_one({"_id": cached["_id"]}, {"$inc": {"hit_count": 1}})
+        update: dict = {"$inc": {"hit_count": 1}}
+        if cached.get("scoring_version") != SCORING_VERSION and cached.get("crawled_pages"):
+            # scorer changed since this was stored: re-score the saved pages (no crawl)
+            fit = score_pages(cached.get("company_name"), cached.get("website"), cached["crawled_pages"])
+            cached.update(fit)
+            update["$set"] = fit
+        await get_db()[COLLECTION].update_one({"_id": cached["_id"]}, update)
         return {**serialize(cached), "cache_hit": True}
 
     loop = asyncio.get_running_loop()
@@ -157,8 +172,13 @@ async def _save(entry: str, username: str, data: dict, pages: list, meta: dict) 
 
     fields = {
         **{k: data.get(k) for k in (
-            "company_name", "website", "country", "industry", "company_category", "business_description",
+            "company_name", "website", "country", "hq_city", "hq_address", "industry", "company_category",
+            "business_description",
         )},
+        "contact_emails": meta["contacts"]["emails"],
+        "contact_phones": meta["contacts"]["phones"],
+        "social_links": meta["contacts"]["social_links"],
+        **meta.get("fit", {}),
         **{k: data.get(k) or [] for k in ("key_operations", "projects_or_recent_activity", "tritorc_relevance")},
         "domain": domain,
         "crawled_pages": pages,

@@ -21,6 +21,14 @@ from bs4 import BeautifulSoup
 from groq import Groq
 
 from app.config.settings import settings
+from app.models.schemas import PlaceDetails
+from app.services.company_profile_crawler import (
+    CUSTOMER_TYPE_FROM_ROLE,
+    EMAIL_HREF_RE,
+    PHONE_HREF_RE,
+    _social_platform,
+)
+from app.services.crawl_scorer import CrawledPage, score_crawl
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -52,7 +60,7 @@ TRITORC_BLOCK = json.dumps(
 )
 
 EMPTY_RESULT = {
-    "company_name": None, "website": None, "country": None, "industry": None,
+    "company_name": None, "website": None, "country": None, "hq_city": None, "hq_address": None, "industry": None,
     "company_category": None, "business_description": None,
     "key_operations": [], "projects_or_recent_activity": [], "tritorc_relevance": [],
 }
@@ -182,18 +190,73 @@ def find_official_site(client, company_name: str):
         return None
 
 
+# Ordered by value: contact/about pages carry HQ address + contact details,
+# the rest carry what the company actually does (fit evidence).
 CANDIDATE_PATH_KEYWORDS = [
-    "about", "company", "services", "products", "solutions", "projects",
-    "portfolio", "news", "media", "press", "industries", "capabilities",
+    "contact", "about", "company", "who-we-are", "locations", "offices",
+    "services", "solutions", "industries", "capabilities", "products",
+    "projects", "portfolio", "news", "media", "press",
 ]
+MAX_PAGES = 8
+PAGE_TEXT_CHARS = 6000
+EMAIL_TEXT_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
+_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")
 
 
-def crawl_company_site(base_url: str, max_pages: int = 4, timeout: int = 15):
-    """Light crawl: homepage + a handful of relevant internal links."""
+# Pages that never describe what the company does (and often bury the crawl in
+# near-duplicate forms), plus the max number of contact-type pages to keep.
+SKIP_PATH_TERMS = ("investor", "career", "job", "faq", "privacy", "cookie", "legal", "imprint", "login", "form")
+CONTACT_PATH_TERMS = ("contact", "locations", "offices")
+MAX_CONTACT_PAGES = 2
+
+
+def _path_priority(path: str) -> int:
+    path = path.lower()
+    if any(t in path for t in SKIP_PATH_TERMS):
+        return 0
+    for i, kw in enumerate(CANDIDATE_PATH_KEYWORDS):
+        if kw in path:
+            return len(CANDIDATE_PATH_KEYWORDS) - i
+    return 0
+
+
+def _extract_contacts(soup, page_url: str, text: str, contacts: dict) -> None:
+    """Emails/phones/social profile links from one page into `contacts`."""
+    emails, phones, socials = contacts["emails"], contacts["phones"], contacts["social_links"]
+    for a in soup.find_all("a", href=True):
+        href = a["href"].strip()
+        m = EMAIL_HREF_RE.match(href)
+        if m:
+            e = m.group(1).strip().lower()
+            if e and e not in emails:
+                emails.append(e)
+            continue
+        m = PHONE_HREF_RE.match(href)
+        if m:
+            ph = m.group(1).strip()
+            if ph and ph not in phones:
+                phones.append(ph)
+            continue
+        platform = _social_platform(urljoin(page_url, href))
+        if platform and platform not in socials:
+            socials[platform] = urljoin(page_url, href)
+    for e in EMAIL_TEXT_RE.findall(text):
+        e = e.lower().rstrip(".")
+        if not e.endswith(_IMAGE_SUFFIXES) and e not in emails:
+            emails.append(e)
+    del emails[10:]
+    del phones[6:]
+
+
+def crawl_company_site(base_url: str, max_pages: int = MAX_PAGES, timeout: int = 15):
+    """Light crawl: homepage + the most valuable internal pages (contact/about
+    first). Returns (pages, error, contacts) where pages are
+    [{"url","title","text"}] and contacts is {emails, phones, social_links}."""
     session = requests.Session()
     session.headers.update({"User-Agent": UA})
     visited = set()
     pages_text = []
+    contacts = {"emails": [], "phones": [], "social_links": {}}
 
     def clean(soup):
         for tag in soup(["script", "style", "noscript"]):
@@ -215,55 +278,65 @@ def crawl_company_site(base_url: str, max_pages: int = 4, timeout: int = 15):
                 return session.get("http://" + url[len("https://"):], timeout=timeout)
             raise
 
+    def add_page(url, soup):
+        # contacts must be read before clean() strips tags from the soup
+        title = soup.title.string.strip() if soup.title and soup.title.string else ""
+        text = clean(soup)
+        _extract_contacts(soup, url, text, contacts)
+        pages_text.append({"url": url, "title": title, "text": text[:PAGE_TEXT_CHARS]})
+        visited.add(url.rstrip("/"))
+
     try:
         r = session_get(base_url)
     except Exception as e:
-        return [], f"error fetching homepage: {e}"
+        return [], f"error fetching homepage: {e}", contacts
 
     if r.status_code != 200:
-        return [], f"homepage returned status {r.status_code}"
+        return [], f"homepage returned status {r.status_code}", contacts
 
-    soup = BeautifulSoup(r.text, "lxml")
-    home_text = clean(soup)
-    pages_text.append({"url": base_url, "text": home_text[:3000]})
-    visited.add(base_url.rstrip("/"))
-
-    candidates = []
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        full = urljoin(base_url, href)
+    home = BeautifulSoup(r.text, "lxml")
+    base_netloc = urlparse(base_url).netloc
+    candidates = {}
+    for a in home.find_all("a", href=True):
+        full = urljoin(base_url, a["href"])
         parsed = urlparse(full)
-        if parsed.netloc != urlparse(base_url).netloc:
+        if parsed.scheme not in ("http", "https") or parsed.netloc != base_netloc:
             continue
-        path_lower = parsed.path.lower()
-        if any(kw in path_lower for kw in CANDIDATE_PATH_KEYWORDS):
+        pri = _path_priority(parsed.path)
+        if pri:
             norm = full.split("#")[0].rstrip("/")
-            if norm not in visited:
-                candidates.append(norm)
+            candidates[norm] = max(candidates.get(norm, 0), pri)
+    add_page(base_url, home)
 
-    seen_candidates = []
-    for c in candidates:
-        if c not in seen_candidates:
-            seen_candidates.append(c)
-
-    for url in seen_candidates[: max_pages - 1]:
+    ranked = sorted((u for u in candidates if u not in visited), key=lambda u: -candidates[u])
+    chosen, contact_pages = [], 0
+    for url in ranked:
+        is_contact = any(t in urlparse(url).path.lower() for t in CONTACT_PATH_TERMS)
+        if is_contact:
+            if contact_pages >= MAX_CONTACT_PAGES:
+                continue
+            contact_pages += 1
+        chosen.append(url)
+        if len(chosen) >= max_pages - 1:
+            break
+    for url in chosen:
         try:
             rr = session_get(url)
             time.sleep(0.5)
             if rr.status_code == 200:
-                s2 = BeautifulSoup(rr.text, "lxml")
-                pages_text.append({"url": url, "text": clean(s2)[:2000]})
-                visited.add(url)
+                add_page(url, BeautifulSoup(rr.text, "lxml"))
         except Exception:
             continue
 
-    return pages_text, None
+    return pages_text, None, contacts
 
 
 ENRICHMENT_SCHEMA_HINT = """{
   "company_name": "",
   "website": "",
   "country": "",
+  "hq_city": "",
+  "hq_address": "",
   "industry": "",
   "company_category": "",
   "business_description": "",
@@ -283,7 +356,7 @@ def build_prompt(company_name, website, crawled_pages, no_site_found, extra_note
         joined = "\n\n---PAGE BREAK---\n\n".join(
             f"URL: {p['url']}\n{p['text']}" for p in crawled_pages
         )
-        source_block = f"WEBSITE CONTENT (scraped just now):\n{joined[:6000]}"
+        source_block = f"WEBSITE CONTENT (scraped just now):\n{joined[:16000]}"
 
     return f"""You are a B2B research analyst. Research the company "{company_name}" using ONLY the source material given below (website text if provided). Do not invent facts not supported by the source; if something is unknown, use null or an empty list.
 
@@ -295,12 +368,14 @@ TASK: Return a single JSON object with EXACTLY this shape (no extra keys, no mar
 Field rules:
 - "company_name": the company's proper name.
 - "website": the root URL used as source, or null if none.
-- "country": the company's primary country of operation/headquarters, or null if not stated.
+- "country": the country of the company's headquarters. Look at contact/about/footer text for an address or "headquartered in". Use the full English country name. null only if truly not stated.
+- "hq_city": the headquarters city, or null.
+- "hq_address": the headquarters street address exactly as written in the source, or null.
 - "industry": the company's primary industry (e.g. "Oil & Gas", "Power Generation", "Steel Manufacturing", "Wind Energy", "Mining", "Construction", "Petrochemical", etc.) based on the source text.
 - "company_category": MUST be exactly one of "distributor", "ECP", "end_user". Use "distributor" if the company resells/distributes industrial tools or equipment. Use "ECP" if it is an engineering/construction/procurement contractor delivering projects for others. Use "end_user" for every other private company or government/public-sector organization that would use industrial tools/services in its own operations (this covers both private firms and government bodies).
 - "business_description": 2-4 factual sentences describing what the company does, grounded in the source text.
-- "key_operations": list of concrete operational activities/business lines mentioned in the source (e.g. "pipeline construction", "refinery operations", "turbine maintenance").
-- "projects_or_recent_activity": list of specific named projects, plants, contracts, expansions, or news items mentioned in the source text. Empty list if none mentioned.
+- "key_operations": up to 8 concrete operational activities/business lines taken from the source. Prefer specific ones ("turbine maintenance", "pipeline construction") over generic ones ("consulting", "engineering").
+- "projects_or_recent_activity": at most 5 of the most notable or recent named projects, plants, contracts, expansions or news items from the source, each with its year if stated. Empty list if none.
 - "tritorc_relevance": list of short strings, each naming a SPECIFIC Tritorc product category, example product, or service from the catalog below AND why it's relevant to this company's operations (e.g. "Hydraulic Torque Wrenches (e.g. TSL Series) — relevant for flange bolting during the refinery turnarounds mentioned on their site"). Only reference items that actually appear in the catalog below. If nothing in the source material suggests a real need, return an empty list rather than forcing a match.
 
 TRITORC PRODUCT & SERVICE CATALOG (only reference items from this list in tritorc_relevance):
@@ -449,6 +524,32 @@ def parse_companies_file(filename: str, content: bytes):
     return [p.strip() for p in parts if p.strip()]
 
 
+def score_pages(name: str | None, website: str | None, pages: list) -> dict:
+    """Run Lead Discovery's own fit scorer (crawl_scorer.score_crawl) over
+    already-crawled pages -- no network. Same tier/role/evidence as a Places
+    lead, so Enrichment and Search results are directly comparable."""
+    if not pages:
+        return {}
+    result = score_crawl(
+        PlaceDetails(name=name or "", address="", website=website),
+        [CrawledPage(url=p["url"], title=p.get("title", ""), text=p.get("text", "")) for p in pages],
+    )
+    return {
+        "crawl_score": result.score,
+        "crawl_tier": result.tier,
+        "business_role": result.business_role,
+        "business_role_reason": result.business_role_reason,
+        "customer_type": CUSTOMER_TYPE_FROM_ROLE.get(result.business_role, "unknown"),
+        "crawl_reason": result.reason,
+        "positive_concepts": result.positive_concepts,
+        "negative_concepts": result.negative_concepts,
+        "crawl_evidence": result.evidence,
+        "crawl_evidence_urls": result.evidence_urls,
+        "detected_language": result.detected_language,
+        "scoring_version": result.scoring_version,
+    }
+
+
 def enrich_company(client, company_input: str, pages: list | None = None, website: str | None = None):
     """Resolve -> crawl -> Groq extraction for one input line.
 
@@ -461,6 +562,7 @@ def enrich_company(client, company_input: str, pages: list | None = None, websit
     is_free_email = False
     email_domain = None
     err = None
+    contacts = {"emails": [], "phones": [], "social_links": {}}
 
     if website:
         display_name = company_input
@@ -478,13 +580,15 @@ def enrich_company(client, company_input: str, pages: list | None = None, websit
         display_name = company_input
 
     if pages is None:
-        pages, err = ([], "no website found") if not website else crawl_company_site(website)
+        pages, err, contacts = (
+            ([], "no website found", contacts) if not website else crawl_company_site(website)
+        )
         if not pages and website:
             # direct URL might have a trailing path or a different scheme; retry with bare origin
             parsed = urlparse(website)
             fallback = f"{parsed.scheme}://{parsed.netloc}"
             if fallback != website:
-                pages, err = crawl_company_site(fallback)
+                pages, err, contacts = crawl_company_site(fallback)
                 if pages:
                     website = fallback
     no_site_found = not pages
@@ -508,5 +612,10 @@ def enrich_company(client, company_input: str, pages: list | None = None, websit
     data.setdefault("company_name", display_name)
     if not data.get("website"):
         data["website"] = website
-    meta = {"crawl_status": "ok" if pages else "no_content", "crawl_error": None if pages else err}
+    meta = {
+        "crawl_status": "ok" if pages else "no_content",
+        "crawl_error": None if pages else err,
+        "contacts": contacts,
+        "fit": score_pages(data.get("company_name") or display_name, data.get("website") or website, pages),
+    }
     return data, pages, meta
