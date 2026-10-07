@@ -1,123 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Sparkles, Upload, Download, Square, Loader2, Database, ExternalLink, RefreshCw, Search as SearchIcon } from 'lucide-react';
+import { Sparkles, Upload, Square, Loader2, Database, RefreshCw, Search as SearchIcon } from 'lucide-react';
+import EnrichmentResults, { CategoryChip } from './EnrichmentResults';
 import { parseEnrichmentFile, streamEnrichment, fetchEnrichments, downloadEnrichmentXlsx } from '../api';
-
-const CATEGORY_LABELS = { distributor: 'Distributor', ECP: 'EPC / Contractor', end_user: 'End user' };
-const CATEGORY_STYLES = {
-    distributor: 'bg-amber-100 text-amber-700',
-    ECP: 'bg-violet-100 text-violet-700',
-    end_user: 'bg-emerald-100 text-emerald-700',
-};
-
-function CategoryChip({ value }) {
-    if (!value) return null;
-    return (
-        <span className={`inline-flex rounded-full px-2.5 py-0.5 text-xs font-semibold ${CATEGORY_STYLES[value] || 'bg-slate-100 text-slate-600'}`}>
-            {CATEGORY_LABELS[value] || value}
-        </span>
-    );
-}
-
-const TIER_STYLES = {
-    best: 'bg-emerald-100 text-emerald-700',
-    strong: 'bg-blue-100 text-blue-700',
-    weak: 'bg-amber-100 text-amber-700',
-    reject: 'bg-rose-100 text-rose-700',
-    unknown: 'bg-slate-100 text-slate-600',
-};
-
-const ROLE_LABELS = {
-    end_user_operator: 'End-user operator',
-    industrial_service_contractor: 'Service contractor',
-    epc_contractor: 'EPC contractor',
-    supplier_distributor: 'Supplier / distributor',
-    competitor_manufacturer: 'Competitor',
-    generic_local_service: 'Generic service',
-    unknown: 'Unknown role',
-};
-
-function ListBlock({ title, items }) {
-    if (!items?.length) return null;
-    return (
-        <div>
-            <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{title}</div>
-            <ul className="mt-1 list-disc space-y-1 pl-5 text-sm text-slate-700">
-                {items.map((it, i) => <li key={i}>{it}</li>)}
-            </ul>
-        </div>
-    );
-}
-
-function CompanyCard({ r }) {
-    return (
-        <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-            <div className="flex flex-wrap items-start justify-between gap-3">
-                <div className="min-w-0">
-                    <h3 className="truncate text-base font-semibold text-slate-900">{r.company_name || r.input}</h3>
-                    {r.website && (
-                        <a href={r.website} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-sm text-blue-600 hover:underline">
-                            {r.domain || r.website} <ExternalLink className="h-3 w-3" />
-                        </a>
-                    )}
-                </div>
-                <div className="flex items-center gap-2">
-                    {r.cache_hit && (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2.5 py-0.5 text-xs font-semibold text-blue-700" title="Served from the stored crawl — no re-crawl">
-                            <Database className="h-3 w-3" /> Stored
-                        </span>
-                    )}
-                    <CategoryChip value={r.company_category} />
-                </div>
-            </div>
-            <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-sm text-slate-500">
-                {(r.hq_city || r.country) && <span>{[r.hq_city, r.country].filter(Boolean).join(', ')}</span>}
-                {r.industry && <span>{r.industry}</span>}
-            </div>
-            {r.crawl_tier && (
-                <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-                    <span className={`inline-flex rounded-full px-2.5 py-0.5 font-semibold capitalize ${TIER_STYLES[r.crawl_tier] || TIER_STYLES.unknown}`}>
-                        Fit: {r.crawl_tier}{r.crawl_score != null ? ` · ${r.crawl_score}` : ''}
-                    </span>
-                    {r.business_role && <span className="rounded-full bg-slate-100 px-2.5 py-0.5 font-semibold text-slate-600">{ROLE_LABELS[r.business_role] || r.business_role}</span>}
-                    {r.business_role_reason && <span className="text-slate-500">{r.business_role_reason}</span>}
-                </div>
-            )}
-            {r.business_description && <p className="mt-3 text-sm text-slate-700">{r.business_description}</p>}
-            <div className="mt-4 grid gap-4 md:grid-cols-3">
-                <ListBlock title="Key operations" items={r.key_operations} />
-                <ListBlock title="Projects & activity" items={r.projects_or_recent_activity} />
-                <ListBlock title="Tritorc relevance" items={r.tritorc_relevance} />
-            </div>
-            {(r.contact_emails?.length > 0 || r.contact_phones?.length > 0 || r.hq_address || Object.keys(r.social_links || {}).length > 0) && (
-                <div className="mt-4 rounded-lg bg-slate-50 p-3 text-sm text-slate-700">
-                    <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">Contact</div>
-                    <div className="mt-1 space-y-0.5">
-                        {r.hq_address && <div>{r.hq_address}</div>}
-                        {r.contact_emails?.length > 0 && <div>{r.contact_emails.join(', ')}</div>}
-                        {r.contact_phones?.length > 0 && <div>{r.contact_phones.join(', ')}</div>}
-                        {Object.keys(r.social_links || {}).length > 0 && (
-                            <div className="flex flex-wrap gap-3">
-                                {Object.entries(r.social_links).map(([k, v]) => (
-                                    <a key={k} href={v} target="_blank" rel="noreferrer" className="capitalize text-blue-600 hover:underline">{k}</a>
-                                ))}
-                            </div>
-                        )}
-                    </div>
-                </div>
-            )}
-            {r.crawl_evidence?.length > 0 && (
-                <details className="mt-3 text-sm text-slate-600">
-                    <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-slate-500">Fit evidence ({r.crawl_evidence.length})</summary>
-                    <ul className="mt-2 list-disc space-y-1 pl-5">
-                        {r.crawl_evidence.map((ev, i) => (
-                            <li key={i}>{ev}{r.crawl_evidence_urls?.[i] && <> <a href={r.crawl_evidence_urls[i]} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">source</a></>}</li>
-                        ))}
-                    </ul>
-                </details>
-            )}
-        </div>
-    );
-}
 
 export default function Enrichment() {
     const [text, setText] = useState('');
@@ -242,15 +126,7 @@ export default function Enrichment() {
             </div>
 
             {results.length > 0 && (
-                <section className="space-y-4">
-                    <div className="flex items-center justify-between">
-                        <h2 className="text-lg font-semibold text-slate-900">Results ({results.length})</h2>
-                        <button onClick={() => downloadEnrichmentXlsx(results).catch((e) => setError(e.message))} className="inline-flex items-center gap-2 rounded-lg border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50">
-                            <Download className="h-4 w-4" /> Excel
-                        </button>
-                    </div>
-                    {results.map((r, i) => <CompanyCard key={`${r.input}-${i}`} r={r} />)}
-                </section>
+                <EnrichmentResults results={results} onExport={() => downloadEnrichmentXlsx(results).catch((e) => setError(e.message))} />
             )}
 
             <section className="space-y-3">

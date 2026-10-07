@@ -18,7 +18,7 @@ import openpyxl
 import requests
 import urllib3
 from bs4 import BeautifulSoup
-from groq import Groq
+from groq import APIStatusError, Groq
 
 from app.config.settings import settings
 from app.models.schemas import PlaceDetails
@@ -198,6 +198,11 @@ CANDIDATE_PATH_KEYWORDS = [
     "projects", "portfolio", "news", "media", "press",
 ]
 MAX_PAGES = 8
+# Groq's on-demand tier caps a request at 8,000 tokens/min including max_tokens;
+# the Tritorc catalog alone is ~10k chars, so site text must stay modest.
+# On a 413 the text budget is stepped down and the call retried.
+PROMPT_TEXT_BUDGET = 8000
+PROMPT_TEXT_BUDGET_STEPS = (8000, 5000, 3000)
 PAGE_TEXT_CHARS = 6000
 EMAIL_TEXT_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
 _IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")
@@ -345,7 +350,8 @@ ENRICHMENT_SCHEMA_HINT = """{
   "tritorc_relevance": []
 }"""
 
-def build_prompt(company_name, website, crawled_pages, no_site_found, extra_note=None):
+def build_prompt(company_name, website, crawled_pages, no_site_found, extra_note=None, text_budget=None):
+    text_budget = text_budget or PROMPT_TEXT_BUDGET
     if no_site_found:
         source_block = extra_note or (
             "NO WEBSITE COULD BE FOUND OR CRAWLED. You may use general knowledge if you are confident about this company, "
@@ -353,10 +359,13 @@ def build_prompt(company_name, website, crawled_pages, no_site_found, extra_note
             "to include a note that no live website source was available."
         )
     else:
+        # split the budget evenly so a long homepage can't crowd out the
+        # contact (HQ) and service pages that come after it
+        per_page = max(800, text_budget // max(1, len(crawled_pages)))
         joined = "\n\n---PAGE BREAK---\n\n".join(
-            f"URL: {p['url']}\n{p['text']}" for p in crawled_pages
+            f"URL: {p['url']}\n{p['text'][:per_page]}" for p in crawled_pages
         )
-        source_block = f"WEBSITE CONTENT (scraped just now):\n{joined[:16000]}"
+        source_block = f"WEBSITE CONTENT (scraped just now):\n{joined}"
 
     return f"""You are a B2B research analyst. Research the company "{company_name}" using ONLY the source material given below (website text if provided). Do not invent facts not supported by the source; if something is unknown, use null or an empty list.
 
@@ -409,7 +418,7 @@ def call_groq_with_retry(client, prompt: str, max_retries: int = 4):
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.2,
-                max_tokens=1500,
+                max_tokens=1200,
                 response_format={"type": "json_object"},
                 reasoning_effort="low",
             )
@@ -600,8 +609,15 @@ def enrich_company(client, company_input: str, pages: list | None = None, websit
         if is_free_email else None
     )
 
-    prompt = build_prompt(display_name, website, pages, no_site_found, extra_note=extra_note)
-    completion = call_groq_with_retry(client, prompt)
+    completion = None
+    for budget in PROMPT_TEXT_BUDGET_STEPS:
+        prompt = build_prompt(display_name, website, pages, no_site_found, extra_note=extra_note, text_budget=budget)
+        try:
+            completion = call_groq_with_retry(client, prompt)
+            break
+        except APIStatusError as e:
+            if e.status_code != 413 or budget == PROMPT_TEXT_BUDGET_STEPS[-1]:
+                raise
     raw = completion.choices[0].message.content
     try:
         data = json.loads(raw)
