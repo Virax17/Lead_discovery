@@ -44,6 +44,22 @@ class Settings(BaseSettings):
     # transient failure isn't frozen in for company_profile_cache_max_age_days.
     company_profile_error_retry_days: int = 7
 
+    # Company Enrichment (LLM extraction + site lookup). GROQ_API_KEY is required
+    # for /api/enrichment; SERPER_API_KEY is optional (name -> website lookup).
+    groq_api_key: str = ""
+    groq_model: str = "openai/gpt-oss-120b"
+    serper_api_key: str = ""
+    # A stored enrichment is reused (no re-crawl, no LLM) for this many days.
+    enrichment_cache_max_age_days: int = 90
+
+    # Company Enrichment (LLM extraction + site lookup). GROQ_API_KEY is required
+    # for /api/enrichment; SERPER_API_KEY is optional (name -> website lookup).
+    groq_api_key: str = ""
+    groq_model: str = "openai/gpt-oss-120b"
+    serper_api_key: str = ""
+    # A stored enrichment is reused (no re-crawl, no LLM) for this many days.
+    enrichment_cache_max_age_days: int = 90
+
     model_config = SettingsConfigDict(env_file=(".env", "backend/.env"), extra="ignore")
 
 settings = Settings()

@@ -68,4 +68,15 @@ async def ensure_indexes():
     await db.company_profiles.create_index(
         [("relevance_tier", pymongo.ASCENDING), ("customer_type", pymongo.ASCENDING)]
     )
+
+    # company_enrichments: Company Enrichment results + crawled page cache
+    # (app/services/enrichment_store.py). Lookup paths: cache_key (domain or
+    # name:<key>), domain, name_keys (multikey), place_ids (multikey; links
+    # to master_businesses for the Places/map pipeline).
+    await db.company_enrichments.create_index([("cache_key", pymongo.ASCENDING)], unique=True)
+    await db.company_enrichments.create_index([("domain", pymongo.ASCENDING)])
+    await db.company_enrichments.create_index([("name_keys", pymongo.ASCENDING)])
+    await db.company_enrichments.create_index([("place_ids", pymongo.ASCENDING)])
+    await db.company_enrichments.create_index([("company_category", pymongo.ASCENDING)])
+    await db.company_enrichments.create_index([("updated_at", pymongo.DESCENDING)])
     print("Database indexes ensured.")

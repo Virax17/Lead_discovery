@@ -249,3 +249,75 @@ export async function downloadFile(id, format, selectedColumns = [], selectedTie
     window.URL.revokeObjectURL(url);
     a.remove();
 }
+
+// ---- Company Enrichment ----
+
+export async function parseEnrichmentFile(file) {
+    const form = new FormData();
+    form.append("file", file);
+    // multipart: let the browser set Content-Type (with boundary) itself
+    const token = localStorage.getItem("token");
+    const res = await fetch(`${API_BASE}/enrichment/parse-file`, {
+        method: "POST",
+        body: form,
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (res.status === 401) redirectToLogin();
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.detail || "Could not parse file");
+    return data.companies;
+}
+
+// Streams Server-Sent Events from POST /enrichment/enrich (EventSource can't
+// POST or send an Authorization header, so this reads the fetch body).
+export async function streamEnrichment(companies, forceRefresh, onEvent, signal) {
+    const res = await authorizedFetch(`${API_BASE}/enrichment/enrich`, {
+        method: "POST",
+        body: JSON.stringify({ companies, force_refresh: forceRefresh }),
+        signal,
+    });
+    if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw new Error(data?.detail || "Enrichment failed to start");
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop();
+        for (const part of parts) {
+            const line = part.split("\n").find((l) => l.startsWith("data: "));
+            if (line) onEvent(JSON.parse(line.slice(6)));
+        }
+    }
+}
+
+export async function fetchEnrichments({ q = "", category = "", skip = 0, limit = 50 } = {}) {
+    const params = new URLSearchParams({ skip, limit });
+    if (q) params.set("q", q);
+    if (category) params.set("category", category);
+    const res = await authorizedFetch(`${API_BASE}/enrichment?${params}`);
+    if (!res.ok) throw new Error("Failed to load stored enrichments");
+    return res.json();
+}
+
+export async function downloadEnrichmentXlsx(results) {
+    const res = await authorizedFetch(`${API_BASE}/enrichment/export-xlsx`, {
+        method: "POST",
+        body: JSON.stringify({ results }),
+    });
+    if (!res.ok) throw new Error("Export failed");
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "company_enrichment.xlsx";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.URL.revokeObjectURL(url);
+}
