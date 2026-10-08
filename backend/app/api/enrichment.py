@@ -158,9 +158,7 @@ async def enrich(request: Request, current_user: str = Depends(get_current_user)
                     done, _ = await asyncio.wait({task}, timeout=10)
                     if done:
                         break
-                    yield ": keepalive
-
-"  # a slow crawl sends nothing for a while; this stops proxies closing the stream
+                    yield ": keepalive\n\n"  # a slow crawl sends nothing for a while; this stops proxies closing the stream
                 data = task.result()
             except asyncio.CancelledError:
                 task.cancel()  # the user pressed Stop or left the page
