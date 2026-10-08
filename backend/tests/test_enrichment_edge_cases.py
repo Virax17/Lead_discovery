@@ -32,6 +32,12 @@ def run(content):
     return eng.enrich_company(FakeGroq(content), "acme.test", pages=PAGES, website="https://acme.test")[0]
 
 
+class AppStarts(unittest.TestCase):
+    def test_whole_app_imports(self):
+        """A syntax error anywhere stops the server from starting (this once broke a deploy)."""
+        import app.main  # noqa: F401
+
+
 class InputClassification(unittest.TestCase):
     def test_names_with_dots_are_not_urls(self):
         for s in ("E.ON", "Acme.Inc", "St.Gobain", "A.P. Moller"):
