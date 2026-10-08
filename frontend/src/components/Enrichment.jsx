@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Sparkles, Upload, Square, Loader2, Database, RefreshCw, Search as SearchIcon } from 'lucide-react';
+import { Sparkles, Upload, Square, Loader2, Database, RefreshCw, Search as SearchIcon, History as HistoryIcon } from 'lucide-react';
 import EnrichmentResults, { Row, RowHeader } from './EnrichmentResults';
+import EnrichmentHistory from './EnrichmentHistory';
 import { parseEnrichmentFile, streamEnrichment, fetchEnrichments, fetchEnrichmentProfiles, enrichSingle, downloadEnrichmentXlsx } from '../api';
 
 const FALLBACK_PROFILES = [{ id: 'tritorc', name: 'Tritorc' }, { id: 'ozat', name: 'Ozat' }];
@@ -9,6 +10,7 @@ const readProfile = () => { try { return localStorage.getItem(PROFILE_KEY) || 't
 
 export default function Enrichment() {
     const [text, setText] = useState('');
+    const [view, setView] = useState('run'); // 'run' | 'history'
     const [forceRefresh, setForceRefresh] = useState(false);
     const [running, setRunning] = useState(false);
     const [progress, setProgress] = useState(null); // {index,total,company}
@@ -100,6 +102,14 @@ export default function Enrichment() {
         loadCandidates();
     };
 
+    // from the history: put a past session's companies back in the box (and switch to its seller) so it can be run again
+    const runAgain = (names, profileId) => {
+        if (!running && !judging && profileId && profileId !== profile && profiles.some((p) => p.id === profileId)) switchProfile(profileId);
+        setText((names || []).join('\n'));
+        setView('run');
+        window.scrollTo?.({ top: 0, behavior: 'smooth' });
+    };
+
     const handleFile = async (e) => {
         const file = e.target.files?.[0];
         e.target.value = '';
@@ -184,6 +194,25 @@ export default function Enrichment() {
                 </div>
             </div>
 
+            <div role="tablist" aria-label="Enrichment views" className="inline-flex rounded-xl bg-slate-100 p-1">
+                {[['run', 'New run', Sparkles], ['history', 'Past sessions', HistoryIcon]].map(([id, label, Icon]) => (
+                    <button
+                        key={id}
+                        type="button"
+                        role="tab"
+                        aria-selected={view === id}
+                        onClick={() => setView(id)}
+                        className={`inline-flex items-center gap-2 rounded-lg px-4 py-1.5 text-sm font-semibold transition ${view === id ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}
+                    >
+                        <Icon className="h-4 w-4" /> {label}
+                        {id === 'run' && running && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                    </button>
+                ))}
+            </div>
+
+            {view === 'history' && <EnrichmentHistory onRunAgain={runAgain} />}
+
+            <div className={view === 'history' ? 'hidden' : 'space-y-8'}>
             <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
                 <div className="flex items-center justify-between gap-3">
                     <label htmlFor="companies" className="text-sm font-semibold text-slate-800">Companies (one per line)</label>
@@ -296,6 +325,7 @@ export default function Enrichment() {
                     )}
                 </div>
             </section>
+            </div>
         </div>
     );
 }

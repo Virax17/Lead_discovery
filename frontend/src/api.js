@@ -337,6 +337,19 @@ export async function fetchEnrichments({ q = "", category = "", skip = 0, limit 
     return res.json();
 }
 
+export async function fetchEnrichmentRuns(page = 1, pageSize = 20) {
+    const res = await authorizedFetch(`${API_BASE}/enrichment/runs?page=${page}&page_size=${pageSize}`);
+    if (!res.ok) throw new Error("Failed to load the enrichment history");
+    return res.json();
+}
+
+export async function fetchEnrichmentRun(id) {
+    const res = await authorizedFetch(`${API_BASE}/enrichment/runs/${encodeURIComponent(id)}`);
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(typeof data?.detail === "string" ? data.detail : "Failed to load that session");
+    return data;
+}
+
 export async function downloadEnrichmentXlsx(results) {
     const res = await authorizedFetch(`${API_BASE}/enrichment/export-xlsx`, {
         method: "POST",

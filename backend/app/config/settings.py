@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     # A stored enrichment is reused (no re-crawl, no LLM) for this many days.
     enrichment_cache_max_age_days: int = 90
 
+    # Company Enrichment data (stored companies + past sessions) is deleted automatically this many days after it
+    # was last enriched/updated (MongoDB TTL index). 0 turns automatic deletion off.
+    enrichment_retention_days: int = 15
+
     model_config = SettingsConfigDict(env_file=(".env", "backend/.env"), extra="ignore")
 
 settings = Settings()

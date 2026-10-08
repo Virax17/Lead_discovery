@@ -6,6 +6,35 @@ The goal is not generic "industrial company" discovery. The system is built to f
 
 ---
 
+## Quick start
+
+You need: **Python 3.12**, **Node 20+**, a **MongoDB** (local or Atlas) and a **Google Places API key**. The Enrichment page also needs a free **Groq** key (a Gemini key is optional and used as backup).
+
+```bash
+# 1. Backend  (terminal 1)
+cd backend
+python -m venv venv
+venv\Scripts\python.exe -m pip install -r requirements.txt     # Windows (macOS/Linux: venv/bin/python)
+cp .env.example .env                                           # then fill in the keys, see "Environment variables"
+venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+
+# 2. Frontend  (terminal 2)
+cd frontend
+npm install
+npm run dev                                                     # open http://127.0.0.1:5173
+```
+
+Sign in with the `BOOTSTRAP_ADMIN_USERNAME` / `BOOTSTRAP_ADMIN_PASSWORD` you put in `backend/.env`. Check the API is up at `http://127.0.0.1:8000/health` (interactive docs at `/docs`).
+
+Run the offline tests (no network or API keys needed):
+
+```bash
+cd backend
+venv\Scripts\python.exe -m unittest discover -s tests
+```
+
+---
+
 ## User flow
 
 1. **Set up a search** (`Dashboard`) — pick a country, then choose one of three location modes:
@@ -23,7 +52,9 @@ The goal is not generic "industrial company" discovery. The system is built to f
 
 5. **History** — past searches with their status, result counts, and quota cost, so a repeat search can reuse what's already been covered instead of re-spending API quota on the same ground (see the skip-log in Layer 1).
 
-6. **Admin** — user accounts, per-user credit limits, monthly quota usage, and maintenance actions (e.g. marking stuck searches as failed).
+6. **Company Enrichment** — paste company names or websites (or upload a CSV/XLSX/TXT/JSON list) and get a verdict for each. See [Company Enrichment](#company-enrichment) below.
+
+7. **Admin** — user accounts, per-user credit limits, monthly quota usage, and maintenance actions (e.g. marking stuck searches as failed).
 
 ---
 
@@ -104,6 +135,31 @@ The rule engine above is fast and free, but it's still a blunt keyword matcher �
 
 ---
 
+## Company Enrichment
+
+Takes a list of company names or websites, crawls each company's own website, and has an AI read it to say who the company is and whether it is a good lead.
+
+**Pick the seller.** A toggle at the top chooses whose point of view the verdict uses: **Tritorc** or **Ozat** (ozat-tools.com). Each seller has its own product catalog, competitor list and accept/reject rules (`backend/app/services/seller_profiles.py`), and its own stored results. The website crawl is shared, so judging a company already crawled for the other seller costs one AI call and no new crawl.
+
+**What you get per company**
+
+- **Crawl Tier** (best/strong/weak/reject/unknown) from the keyword scorer, shown with its score.
+- **LLM Decision**: *Accept* (green row), *Review* (yellow: low confidence or thin evidence), *Reject* (red), or *Weak* (light orange). Competitors (e.g. HYTORC, Enerpac for Tritorc) are marked and rejected; distributors, resellers and rental houses are accepted.
+- Customer type (End user / EPC / Distributor / Competitor), industry, address, phone, contacts, recent projects, "why it fits", and a turnover class (**A / B / C**) when the site states one.
+- Your own override (Accept / Review / Reject plus a note) and a **Wrong company?** button that re-matches by website.
+
+**How duplicates and re-runs work.** Every company is stored once in MongoDB (`company_enrichments`). A name, a website and spelling variants (`Acme Ltd`, `ACME`, `acme.com`) all point to the same record. A saved result is reused instead of re-crawling while it is younger than 90 days (`ENRICHMENT_CACHE_MAX_AGE_DAYS`); it is re-crawled only when older, when the last crawl failed, or when you press Retry/Refresh. If the same company is requested twice at once, the second request waits and reuses the first one's result.
+
+**Automatic deletion.** Enrichment data (stored companies and the Past sessions list, nothing else) is deleted automatically 15 days after it was last enriched or started, using MongoDB TTL indexes (`ENRICHMENT_RETENTION_DAYS`, default 15, `0` turns it off). Viewing a saved result does not extend it; enriching or retrying it again does. Because of this, the effective reuse window is 15 days even though `ENRICHMENT_CACHE_MAX_AGE_DAYS` defaults to 90. Lead Discovery searches and the Master Database are never touched.
+
+**How the AI is called.** Groq (`openai/gpt-oss-120b`) first; if it fails (daily limit, busy, outage, unreadable answer) the request automatically falls back to Gemini (`GEMINI_API_KEY`). Failures are shown in plain language with a Retry button. Results stream into the table one company at a time, so Stop keeps everything finished so far.
+
+**Safety.** Only public http(s) websites are fetched (private/internal addresses are blocked and redirects are re-checked), page downloads are size- and time-capped, page text is treated as untrusted data, and spreadsheet exports neutralise formula-style cells.
+
+Key files: `backend/app/api/enrichment.py` (routes), `services/enrichment_engine.py` (crawl + AI), `services/enrichment_store.py` (storage, cache, per-seller views), `services/seller_profiles.py` (Tritorc/Ozat), `services/ozat_scorer.py`, and `frontend/src/components/Enrichment*.jsx`.
+
+---
+
 ## What counts as a good Tritorc lead
 
 Preferred roles: `end_user_operator`, `industrial_service_contractor`, `epc_contractor`.
@@ -134,12 +190,14 @@ End-user plant/operator                                    = good lead
 - Master database with deduplication by Google `place_id`, persistent across every search ever run.
 - CSV/XLSX export with a column picker.
 - `backfill_scores.py` — re-scores any business whose stored score predates the current scoring logic, using its already-stored website, at **zero** added Google Places quota cost.
+- **Company Enrichment** with a Tritorc/Ozat seller toggle, accept/review/reject verdicts, a shared crawl cache, and Groq-with-Gemini-backup AI.
 - JWT auth, per-user credit limits, admin portal, and Google Places API quota tracking (5,000 free calls/month, matching Google's actual free tier).
 
 ## Important implementation docs
 
-- [Current implementation status](C:/Users/VP89/Desktop/Lead_discovery/IMPLEMENTATION_STATUS.md)
-- [Deployment guide](C:/Users/VP89/Desktop/Lead_discovery/DEPLOYMENT.md)
+- [Current implementation status](IMPLEMENTATION_STATUS.md)
+- [Deployment guide](DEPLOYMENT.md)
+- [Company Enrichment plan](COMPANY_ENRICHMENT_INTEGRATION_PLAN.md)
 
 Older, narrower planning docs (`SUPPLIER_ROLE_SCORING_FIX_PLAN.md`, `MULTILINGUAL_CRAWLER_PLAN.md`, `BROWSER_PLUGIN_*`) remain in the repo for historical context but describe earlier stages of the system — this README reflects the current, active architecture.
 
@@ -149,24 +207,30 @@ Older, narrower planning docs (`SUPPLIER_ROLE_SCORING_FIX_PLAN.md`, `MULTILINGUA
 Lead_discovery/
 |-- backend/
 |   |-- app/
-|   |   |-- api/          # FastAPI routes (auth, searches, quota, admin, settings)
+|   |   |-- api/          # FastAPI routes (auth, searches, quota, admin, settings, enrichment)
 |   |   |-- config/       # settings, quota thresholds, concept/keyword taxonomy, geo data
 |   |   |-- db/           # Mongo connection + index setup
 |   |   |-- models/       # Pydantic schemas
 |   |   `-- services/     # search_runner, places_client, industrial_anchors,
-|   |                     # crawl_scorer, llm_fallback, location_search_log, ...
+|   |                     # crawl_scorer, llm_fallback, location_search_log,
+|   |                     # enrichment_engine/store, seller_profiles, ozat_scorer, ...
 |   |-- scripts/          # backfill_scores.py and other one-off/maintenance scripts
+|   |-- tests/            # offline unit tests (python -m unittest discover -s tests)
+|   |-- Dockerfile        # production image
 |   |-- requirements.txt
 |   |-- run_backend.ps1
 |   `-- run_backend.bat
 |-- frontend/
 |   |-- src/
 |   |   |-- components/   # Dashboard, LocationPicker, Progress, Results,
-|   |   |                 # MasterDatabase, History, Admin, Login
+|   |   |                 # MasterDatabase, History, Admin, Login,
+|   |   |                 # Enrichment, EnrichmentResults, leadShared
 |   |   `-- ...
 |   |-- package.json
 |   `-- vite.config.js
-|-- data/audit/
+|-- docker-compose.yml   # production compose file (used on the server)
+|-- .github/workflows/   # deploy-backend.yml: build image, deploy to EC2 on merge to master
+|-- deploy/              # server setup script
 |-- DEPLOYMENT.md
 |-- IMPLEMENTATION_STATUS.md
 `-- README.md
@@ -179,7 +243,7 @@ Lead_discovery/
 From PowerShell:
 
 ```powershell
-cd C:\Users\VP89\Desktop\Lead_discovery\backend
+cd backend
 .\venv\Scripts\python.exe -m pip install -r requirements.txt
 .\venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
@@ -198,7 +262,7 @@ http://127.0.0.1:8000/api
 Open a second PowerShell:
 
 ```powershell
-cd C:\Users\VP89\Desktop\Lead_discovery\frontend
+cd frontend
 npm install
 npm run dev
 ```
@@ -231,6 +295,14 @@ BOOTSTRAP_USER_CREDIT_LIMIT=1000
 
 CORS_ALLOWED_ORIGINS=
 
+# Company Enrichment
+GROQ_API_KEY=your-groq-api-key              # required for the Enrichment page
+GROQ_MODEL=openai/gpt-oss-120b
+SERPER_API_KEY=                             # optional: company name -> official website lookup
+ENRICHMENT_CACHE_MAX_AGE_DAYS=90            # reuse a saved crawl for this long
+ENRICHMENT_RETENTION_DAYS=15                # delete enrichment data this long after it was last updated (0 = never)
+
+# Backup AI for Enrichment (used when Groq fails) and for the Lead Discovery LLM fallback
 GEMINI_API_KEY=your-google-ai-studio-gemini-api-key
 
 LLM_FALLBACK_ENABLED=false
@@ -247,29 +319,36 @@ Keep real `.env` files private. `GEMINI_API_KEY`/`LLM_FALLBACK_ENABLED` are opti
 Backend:
 
 ```powershell
-cd C:\Users\VP89\Desktop\Lead_discovery\backend
+cd backend
 .\venv\Scripts\python.exe -m compileall -q app scripts
 .\venv\Scripts\python.exe -c "import app.main; print('backend import ok')"
+.\venv\Scripts\python.exe -m unittest discover -s tests
 ```
 
 Frontend:
 
 ```powershell
-cd C:\Users\VP89\Desktop\Lead_discovery\frontend
+cd frontend
 npm run build
 ```
 
 Re-score existing businesses under the current scoring logic (no Places quota used):
 
 ```powershell
-cd C:\Users\VP89\Desktop\Lead_discovery\backend
+cd backend
 .\venv\Scripts\python.exe -m scripts.backfill_scores --dry-run --limit 20
 .\venv\Scripts\python.exe -m scripts.backfill_scores --concurrency 4
 ```
 
 ## Deployment
 
-Backend runs on an AWS EC2 instance (Ubuntu, systemd service + nginx reverse proxy) pulling directly from this GitHub repo; the frontend deploys separately on Vercel. See [DEPLOYMENT.md](C:/Users/VP89/Desktop/Lead_discovery/DEPLOYMENT.md) for the full setup and redeploy steps.
+The backend runs as a **Docker container** on an AWS EC2 instance behind nginx (HTTPS), and the frontend deploys on Vercel.
+
+- **Pull request:** GitHub Actions builds the Docker image only (nothing is published or deployed).
+- **Merge to `master`:** Actions builds and pushes `ghcr.io/tritorc-ai1/lead-discovery-backend`, SSHes into the server, and restarts the container with the new image. The server's `.env` holds the secrets; they are never in the image.
+- If a deploy fails, open the run under the repo's **Actions** tab (`Deploy backend`) and read the `deploy` job log; on the server, `docker compose logs backend` shows the same startup output.
+
+See [DEPLOYMENT.md](DEPLOYMENT.md) for the full setup and redeploy steps.
 
 ## Team workflow rule
 

@@ -1,5 +1,36 @@
+import logging
+
 import pymongo
+from pymongo.errors import OperationFailure
+
+from app.config.settings import settings
 from app.db.connection import get_db
+
+log = logging.getLogger(__name__)
+
+
+async def _ensure_ttl_index(coll, field: str, days: int, replaces: str | None = None) -> None:
+    """Make MongoDB delete documents automatically `days` days after the date in `field` (0 = no automatic deletion).
+    `replaces` is an older plain index on the same field that the TTL index makes redundant."""
+    name = f"{field}_ttl"
+    seconds = int(days) * 86400
+    if replaces:
+        try:
+            await coll.drop_index(replaces)
+        except OperationFailure:
+            pass  # not there (already replaced, or never created)
+    if days <= 0:
+        try:
+            await coll.drop_index(name)
+        except OperationFailure:
+            pass
+        return
+    try:
+        await coll.create_index([(field, pymongo.ASCENDING)], name=name, expireAfterSeconds=seconds)
+    except OperationFailure:
+        # the index exists with a different retention: change it in place
+        await coll.database.command("collMod", coll.name, index={"name": name, "expireAfterSeconds": seconds})
+    log.info("%s.%s expires after %s days", coll.name, field, days)
 
 async def ensure_indexes():
     db = get_db()
@@ -78,5 +109,9 @@ async def ensure_indexes():
     await db.company_enrichments.create_index([("name_keys", pymongo.ASCENDING)])
     await db.company_enrichments.create_index([("place_ids", pymongo.ASCENDING)])
     await db.company_enrichments.create_index([("company_category", pymongo.ASCENDING)])
-    await db.company_enrichments.create_index([("updated_at", pymongo.DESCENDING)])
+    # automatic deletion: `updated_at` only moves when a company is (re-)enriched, not when a saved result is just viewed
+    await _ensure_ttl_index(db.company_enrichments, "updated_at", settings.enrichment_retention_days, replaces="updated_at_-1")
+    # enrichment_runs: one document per enrichment session (history list, newest first, per user)
+    await db.enrichment_runs.create_index([("created_by", pymongo.ASCENDING), ("started_at", pymongo.DESCENDING)])
+    await _ensure_ttl_index(db.enrichment_runs, "started_at", settings.enrichment_retention_days, replaces="started_at_-1")
     print("Database indexes ensured.")
