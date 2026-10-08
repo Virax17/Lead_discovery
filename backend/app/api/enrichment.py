@@ -8,7 +8,7 @@ import openpyxl
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
-from app.api.auth import get_current_user
+from app.api.auth import get_current_user, get_current_user_profile
 from app.db.connection import get_db
 from app.services.enrichment_engine import (
     clean_company_line,
@@ -19,6 +19,7 @@ from app.services.enrichment_engine import (
     normalize_if_url,
     parse_companies_file,
 )
+from app.services import enrichment_runs
 from app.services.export_engine import customer_type_label
 from app.services.seller_profiles import DEFAULT_PROFILE, PROFILES, get_profile, valid_profile_id
 from app.services.enrichment_store import (
@@ -149,7 +150,30 @@ async def enrich(request: Request, current_user: str = Depends(get_current_user)
 
         results = []
         total = len(names)
-        yield _sse({"type": "start", "total": total})
+        run_id = None
+        try:
+            run_id = await enrichment_runs.start_run(current_user, profile, get_profile(profile).name, names, force_refresh)
+        except Exception:
+            log.exception("could not record the enrichment run")  # history is a nice-to-have: never block the run itself
+        status = "stopped"  # stays this if the user presses Stop or the connection drops
+        yield _sse({"type": "start", "total": total, "run_id": str(run_id) if run_id else None})
+        try:
+            async for chunk in _run_companies(client, names, current_user, force_refresh, profile, run_id, results):
+                yield chunk
+            status = "completed"
+        except Exception:
+            status = "failed"
+            raise
+        finally:
+            if run_id:
+                try:
+                    await asyncio.shield(enrichment_runs.finish_run(run_id, status))
+                except Exception:
+                    log.exception("could not close the enrichment run")
+        yield _sse({"type": "complete", "count": len(results)})  # each result already went out with its "done" event
+
+    async def _run_companies(client, names, current_user, force_refresh, profile, run_id, results):
+        total = len(names)
         for idx, name in enumerate(names, start=1):
             yield _sse({"type": "progress", "index": idx, "total": total, "company": name, "status": "processing"})
             task = asyncio.ensure_future(get_or_enrich(client, name, current_user, force_refresh=force_refresh, profile=profile))
@@ -175,11 +199,15 @@ async def enrich(request: Request, current_user: str = Depends(get_current_user)
                 }
             data["input"] = name
             results.append(data)
+            if run_id:
+                try:
+                    await enrichment_runs.add_item(run_id, name, data)
+                except Exception:
+                    log.exception("could not record %r on the run", name)
             yield _sse({
                 "type": "progress", "index": idx, "total": total, "company": name,
                 "status": "done", "cache_hit": bool(data.get("cache_hit")), "result": data,
             })
-        yield _sse({"type": "complete", "count": len(results)})  # each result already went out with its "done" event
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -281,6 +309,26 @@ async def list_enrichments(
         doc["id"] = str(doc.pop("_id"))
         items.append(apply_profile(doc, profile))
     return {"total": total, "items": items}
+
+
+@router.get("/runs")
+async def list_runs(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    current_user: dict = Depends(get_current_user_profile),
+):
+    """Past enrichment sessions, newest first: when each was started, for which seller, and how it went.
+    Admins see everyone's; other users see their own."""
+    return await enrichment_runs.list_runs(current_user["username"], current_user.get("role") == "admin", page, page_size)
+
+
+@router.get("/runs/{run_id}")
+async def get_run(run_id: str, current_user: dict = Depends(get_current_user_profile)):
+    """One past session with its companies (reloaded from the store, so later retries and overrides show)."""
+    run = await enrichment_runs.get_run(run_id, current_user["username"], current_user.get("role") == "admin")
+    if not run:
+        raise HTTPException(status_code=404, detail="That session wasn't found.")
+    return run
 
 
 @router.get("/lookup")
